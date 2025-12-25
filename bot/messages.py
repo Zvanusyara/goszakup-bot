@@ -72,6 +72,58 @@ def format_stats_message(stats: dict) -> str:
     )
 
 
+def format_admin_dashboard(dashboard_data: dict) -> str:
+    """
+    Форматирование главного дашборда администратора
+
+    Args:
+        dashboard_data: Данные для дашборда со статистикой
+
+    Returns:
+        Отформатированное сообщение дашборда
+    """
+    from datetime import datetime
+
+    # Текущая дата и время
+    now = datetime.now()
+    current_date = now.strftime("%d.%m.%Y")
+    current_time = now.strftime("%H:%M")
+
+    # Данные объявлений
+    new = dashboard_data.get('new', 0)
+    in_progress = dashboard_data.get('in_progress', 0)
+    processed = dashboard_data.get('processed', 0)
+    rejected = dashboard_data.get('rejected', 0)
+    total_today = dashboard_data.get('total_today', 0)
+
+    # Критические зоны
+    stuck_24h = dashboard_data.get('stuck_24h', 0)
+    no_response_2h = dashboard_data.get('no_response_2h', 0)
+    needs_attention = dashboard_data.get('needs_attention', 0)
+
+    message = (
+        f"═══════════════════════════\n"
+        f"👔 <b>АДМИН-ПАНЕЛЬ</b>\n"
+        f"═══════════════════════════\n\n"
+        f"📅 Сегодня: {current_date}\n"
+        f"⏰ Обновлено: {current_time}\n\n"
+
+        f"📊 <b>ОБЪЯВЛЕНИЯ</b>\n\n"
+        f"🆕 Новые: <b>{new}</b>\n"
+        f"⏳ В работе: <b>{in_progress}</b>\n"
+        f"✅ Обработаны: <b>{processed}</b>\n"
+        f"❌ Отклонены: <b>{rejected}</b>\n\n"
+        f"📈 Всего за день: <b>{total_today}</b>\n\n"
+
+        f"⚡ <b>КРИТИЧЕСКИЕ ЗОНЫ</b>\n\n"
+        f"🔴 Зависли &gt;24ч: <b>{stuck_24h}</b>\n"
+        f"🟡 Без ответа &gt;2ч: <b>{no_response_2h}</b>\n"
+        f"⚠️ Нужно внимание: <b>{needs_attention}</b>"
+    )
+
+    return message
+
+
 START_MESSAGE = """
 👋 Добро пожаловать в систему мониторинга госзакупок!
 

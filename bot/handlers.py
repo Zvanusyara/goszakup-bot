@@ -20,10 +20,13 @@ from bot.messages import (
     HELP_MESSAGE,
     format_accepted_notification,
     format_rejected_notification,
-    format_stats_message
+    format_stats_message,
+    format_admin_dashboard
 )
+from bot.keyboards import get_admin_dashboard_keyboard
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, MANAGERS
 from sqlalchemy import func
+from datetime import datetime, timedelta
 
 router = Router()
 
@@ -94,6 +97,93 @@ async def cmd_stats(message: Message):
 
     finally:
         session.close()
+
+
+def get_admin_dashboard_data() -> dict:
+    """
+    Получить данные для дашборда администратора из БД
+
+    Returns:
+        dict с данными для дашборда
+    """
+    session = get_session()
+    try:
+        # Начало сегодняшнего дня
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # Статистика объявлений
+        new = session.query(Announcement).filter(
+            Announcement.status == 'pending'
+        ).count()
+
+        in_progress = session.query(Announcement).filter(
+            Announcement.status == 'accepted'
+        ).count()
+
+        processed = session.query(Announcement).filter(
+            Announcement.status == 'accepted'
+        ).count()
+
+        rejected = session.query(Announcement).filter(
+            Announcement.status == 'rejected'
+        ).count()
+
+        total_today = session.query(Announcement).filter(
+            Announcement.created_at >= today_start
+        ).count()
+
+        # Критические зоны
+        # Зависли >24ч (pending более 24 часов)
+        stuck_24h_threshold = datetime.now() - timedelta(hours=24)
+        stuck_24h = session.query(Announcement).filter(
+            Announcement.status == 'pending',
+            Announcement.created_at < stuck_24h_threshold
+        ).count()
+
+        # Без ответа >2ч (pending более 2 часов)
+        no_response_2h_threshold = datetime.now() - timedelta(hours=2)
+        no_response_2h = session.query(Announcement).filter(
+            Announcement.status == 'pending',
+            Announcement.created_at < no_response_2h_threshold
+        ).count()
+
+        # Нужно внимание = зависшие + без ответа (уникальные)
+        needs_attention = stuck_24h + no_response_2h
+
+        return {
+            'new': new,
+            'in_progress': in_progress,
+            'processed': processed,
+            'rejected': rejected,
+            'total_today': total_today,
+            'stuck_24h': stuck_24h,
+            'no_response_2h': no_response_2h,
+            'needs_attention': needs_attention
+        }
+
+    finally:
+        session.close()
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    """Обработчик команды /admin - дашборд администратора"""
+    user_id = message.from_user.id
+
+    # Проверка прав администратора
+    if ADMIN_TELEGRAM_ID and str(user_id) != str(ADMIN_TELEGRAM_ID):
+        await message.answer("❌ У вас нет прав администратора.")
+        return
+
+    # Получить данные для дашборда
+    dashboard_data = get_admin_dashboard_data()
+
+    # Отправить дашборд с клавиатурой
+    await message.answer(
+        format_admin_dashboard(dashboard_data),
+        parse_mode='HTML',
+        reply_markup=get_admin_dashboard_keyboard()
+    )
 
 
 @router.callback_query(F.data.startswith("accept_"))
@@ -249,6 +339,31 @@ async def process_rejection_reason(message: Message, state: FSMContext, bot: Bot
 
     # Очистить состояние
     await state.clear()
+
+
+@router.callback_query(F.data == "admin_refresh_dashboard")
+async def callback_refresh_dashboard(callback: CallbackQuery):
+    """Обработчик кнопки 'Обновить' дашборда"""
+    user_id = callback.from_user.id
+
+    # Проверка прав администратора
+    if ADMIN_TELEGRAM_ID and str(user_id) != str(ADMIN_TELEGRAM_ID):
+        await callback.answer("❌ У вас нет прав администратора.", show_alert=True)
+        return
+
+    # Получить свежие данные
+    dashboard_data = get_admin_dashboard_data()
+
+    # Обновить сообщение
+    try:
+        await callback.message.edit_text(
+            format_admin_dashboard(dashboard_data),
+            parse_mode='HTML',
+            reply_markup=get_admin_dashboard_keyboard()
+        )
+        await callback.answer("✅ Дашборд обновлен")
+    except Exception as e:
+        await callback.answer("⚠️ Данные не изменились", show_alert=False)
 
 
 def get_dispatcher() -> Dispatcher:
