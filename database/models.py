@@ -46,6 +46,7 @@ class Announcement(Base):
     # Статус обработки
     status = Column(String(50), default='pending', index=True)  # pending, accepted, rejected
     rejection_reason = Column(Text, nullable=True)
+    is_processed = Column(Boolean, default=False)  # Обработано ли менеджером после принятия
 
     # Временные метки
     created_at = Column(DateTime, default=datetime.utcnow)

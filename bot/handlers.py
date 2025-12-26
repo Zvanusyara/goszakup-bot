@@ -21,14 +21,44 @@ from bot.messages import (
     format_accepted_notification,
     format_rejected_notification,
     format_stats_message,
-    format_admin_dashboard
+    format_admin_dashboard,
+    format_work_announcements_list,
+    format_announcement_details
 )
-from bot.keyboards import get_admin_dashboard_keyboard
+from bot.keyboards import (
+    get_admin_dashboard_keyboard,
+    get_work_announcements_keyboard,
+    get_announcement_actions_keyboard,
+    get_manager_main_keyboard,
+    get_admin_main_keyboard
+)
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, MANAGERS
 from sqlalchemy import func
 from datetime import datetime, timedelta
 
 router = Router()
+
+
+def get_user_keyboard(user_id: int):
+    """Получить клавиатуру для пользователя в зависимости от его роли"""
+    # Проверяем, является ли пользователь админом
+    is_admin = ADMIN_TELEGRAM_ID and str(user_id) == str(ADMIN_TELEGRAM_ID)
+
+    # Проверяем, является ли пользователь менеджером
+    is_manager = False
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            is_manager = True
+            break
+
+    # Возвращаем клавиатуру в зависимости от роли
+    if is_admin:
+        return get_admin_main_keyboard()
+    elif is_manager:
+        return get_manager_main_keyboard()
+    else:
+        return None
+
 
 
 # FSM для получения причины отказа
@@ -38,13 +68,14 @@ class RejectionState(StatesGroup):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    """Обработчик команды /start"""
-    await message.answer(START_MESSAGE, parse_mode='HTML')
+    keyboard = get_user_keyboard(message.from_user.id)
+    await message.answer(START_MESSAGE, parse_mode='HTML', reply_markup=keyboard)
 
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    """Обработчик команды /help"""
+    keyboard = get_user_keyboard(message.from_user.id)
+    await message.answer(HELP_MESSAGE, parse_mode='HTML', reply_markup=keyboard)
     await message.answer(HELP_MESSAGE, parse_mode='HTML')
 
 
@@ -93,10 +124,46 @@ async def cmd_stats(message: Message):
             'rejected': rejected
         }
 
-        await message.answer(format_stats_message(stats), parse_mode='HTML')
+        keyboard = get_user_keyboard(user_id)
+        await message.answer(format_stats_message(stats), parse_mode='HTML', reply_markup=keyboard)
 
     finally:
         session.close()
+
+
+@router.message(Command("my_work"))
+async def cmd_my_work(message: Message):
+    """Обработчик команды /my_work - объявления в работе"""
+    user_id = message.from_user.id
+
+    # Найти ID менеджера по Telegram ID
+    manager_id = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            break
+
+    if not manager_id:
+        await message.answer("❌ Вы не зарегистрированы как менеджер в системе.")
+        return
+
+    # Получить принятые объявления из БД
+    announcements = AnnouncementCRUD.get_accepted_for_manager(manager_id)
+
+    # Отправить список объявлений
+    # Инлайн-клавиатура для объявлений + reply-клавиатура для меню
+    inline_keyboard = get_work_announcements_keyboard(announcements) if announcements else None
+
+    await message.answer(
+        format_work_announcements_list(announcements),
+        parse_mode='HTML',
+        reply_markup=inline_keyboard
+    )
+
+    # Отправить reply-клавиатуру отдельным сообщением, если нужно
+    if not inline_keyboard:
+        keyboard = get_user_keyboard(user_id)
+        await message.answer("Используйте кнопки меню для навигации:", reply_markup=keyboard)
 
 
 def get_admin_dashboard_data() -> dict:
@@ -117,11 +184,13 @@ def get_admin_dashboard_data() -> dict:
         ).count()
 
         in_progress = session.query(Announcement).filter(
-            Announcement.status == 'accepted'
+            Announcement.status == 'accepted',
+            Announcement.is_processed == False
         ).count()
 
         processed = session.query(Announcement).filter(
-            Announcement.status == 'accepted'
+            Announcement.status == 'accepted',
+            Announcement.is_processed == True
         ).count()
 
         rejected = session.query(Announcement).filter(
@@ -364,6 +433,209 @@ async def callback_refresh_dashboard(callback: CallbackQuery):
         await callback.answer("✅ Дашборд обновлен")
     except Exception as e:
         await callback.answer("⚠️ Данные не изменились", show_alert=False)
+
+
+@router.callback_query(F.data.startswith("work_view_"))
+async def callback_work_view(callback: CallbackQuery):
+    """Обработчик просмотра объявления из списка в работе"""
+    announcement_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    # Проверка авторизации менеджера
+    manager_id = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            break
+
+    if not manager_id:
+        await callback.answer("❌ Вы не авторизованы", show_alert=True)
+        return
+
+    # Получить объявление из БД
+    session = get_session()
+    try:
+        announcement = session.query(Announcement).filter(
+            Announcement.id == announcement_id,
+            Announcement.manager_id == manager_id
+        ).first()
+
+        if not announcement:
+            await callback.answer("❌ Объявление не найдено", show_alert=True)
+            return
+
+        # Показать краткую информацию с кнопками действий
+        message_text = (
+            f"{'✅' if announcement.is_processed else '📄'} <b>{announcement.announcement_number}</b>\n\n"
+            f"📍 {announcement.region or 'N/A'}\n"
+            f"🏢 {announcement.organization_name or 'N/A'}\n\n"
+            f"💼 {announcement.lot_name[:100] + '...' if announcement.lot_name and len(announcement.lot_name) > 100 else announcement.lot_name or 'N/A'}"
+        )
+
+        await callback.message.edit_text(
+            message_text,
+            parse_mode='HTML',
+            reply_markup=get_announcement_actions_keyboard(announcement_id, announcement.is_processed)
+        )
+        await callback.answer()
+
+    finally:
+        session.close()
+
+
+@router.callback_query(F.data.startswith("work_processed_"))
+async def callback_work_processed(callback: CallbackQuery, bot: Bot):
+    """Обработчик кнопки 'Обработал'"""
+    announcement_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    # Проверка авторизации менеджера
+    manager_id = None
+    manager_name = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            manager_name = mdata['name']
+            break
+
+    if not manager_id:
+        await callback.answer("❌ Вы не авторизованы", show_alert=True)
+        return
+
+    # Обновить статус в БД
+    AnnouncementCRUD.mark_as_processed(announcement_id)
+
+    # Записать действие
+    ManagerActionCRUD.create({
+        'announcement_id': announcement_id,
+        'manager_id': manager_id,
+        'manager_name': manager_name,
+        'telegram_id': user_id,
+        'action': 'processed',
+        'comment': 'Отметил как обработанное'
+    })
+
+    # Получить обновленное объявление
+    session = get_session()
+    try:
+        announcement = session.query(Announcement).filter(
+            Announcement.id == announcement_id
+        ).first()
+
+        if announcement:
+            # Обновить сообщение с новым статусом
+            message_text = (
+                f"✅ <b>{announcement.announcement_number}</b>\n\n"
+                f"📍 {announcement.region or 'N/A'}\n"
+                f"🏢 {announcement.organization_name or 'N/A'}\n\n"
+                f"💼 {announcement.lot_name[:100] + '...' if announcement.lot_name and len(announcement.lot_name) > 100 else announcement.lot_name or 'N/A'}"
+            )
+
+            await callback.message.edit_text(
+                message_text,
+                parse_mode='HTML',
+                reply_markup=get_announcement_actions_keyboard(announcement_id, True)
+            )
+            await callback.answer("✅ Объявление отмечено как обработанное!", show_alert=True)
+
+    finally:
+        session.close()
+
+
+@router.callback_query(F.data.startswith("work_details_"))
+async def callback_work_details(callback: CallbackQuery):
+    """Обработчик кнопки 'Подробности'"""
+    announcement_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    # Проверка авторизации менеджера
+    manager_id = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            break
+
+    if not manager_id:
+        await callback.answer("❌ Вы не авторизованы", show_alert=True)
+        return
+
+    # Получить объявление из БД
+    session = get_session()
+    try:
+        announcement = session.query(Announcement).filter(
+            Announcement.id == announcement_id,
+            Announcement.manager_id == manager_id
+        ).first()
+
+        if not announcement:
+            await callback.answer("❌ Объявление не найдено", show_alert=True)
+            return
+
+        # Показать полную информацию
+        await callback.message.edit_text(
+            format_announcement_details(announcement),
+            parse_mode='HTML',
+            reply_markup=get_announcement_actions_keyboard(announcement_id, announcement.is_processed)
+        )
+        await callback.answer()
+
+    finally:
+        session.close()
+
+
+@router.callback_query(F.data == "work_back_to_list")
+async def callback_work_back_to_list(callback: CallbackQuery):
+    """Обработчик кнопки 'Назад к списку'"""
+    user_id = callback.from_user.id
+
+    # Найти ID менеджера
+    manager_id = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            break
+
+    if not manager_id:
+        await callback.answer("❌ Вы не авторизованы", show_alert=True)
+        return
+
+    # Получить список объявлений
+    announcements = AnnouncementCRUD.get_accepted_for_manager(manager_id)
+
+    # Вернуться к списку
+    await callback.message.edit_text(
+        format_work_announcements_list(announcements),
+        parse_mode='HTML',
+        reply_markup=get_work_announcements_keyboard(announcements) if announcements else None
+    )
+    await callback.answer()
+
+# ========================================
+# Обработчики кнопок (текстовых сообщений)
+# ========================================
+
+@router.message(F.text == "📋 Объявления в работе")
+async def button_my_work(message: Message):
+    """Обработчик кнопки 'Объявления в работе'"""
+    await cmd_my_work(message)
+
+
+@router.message(F.text == "📊 Статистика")
+async def button_stats(message: Message):
+    """Обработчик кнопки 'Статистика'"""
+    await cmd_stats(message)
+
+
+@router.message(F.text == "ℹ️ Справка")
+async def button_help(message: Message):
+    """Обработчик кнопки 'Справка'"""
+    await cmd_help(message)
+
+
+@router.message(F.text == "👔 Админ-панель")
+async def button_admin(message: Message):
+    """Обработчик кнопки 'Админ-панель'"""
+    await cmd_admin(message)
 
 
 def get_dispatcher() -> Dispatcher:

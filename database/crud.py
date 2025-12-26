@@ -136,6 +136,44 @@ class AnnouncementCRUD:
         finally:
             session.close()
 
+    @staticmethod
+    def get_accepted_for_manager(manager_id: int) -> List[Announcement]:
+        """Получить принятые объявления для менеджера (в работе)"""
+        session = get_session()
+        try:
+            return session.query(Announcement).filter(
+                and_(
+                    Announcement.manager_id == manager_id,
+                    Announcement.status == 'accepted'
+                )
+            ).order_by(desc(Announcement.created_at)).all()
+        finally:
+            session.close()
+
+    @staticmethod
+    def mark_as_processed(announcement_id: int):
+        """Отметить объявление как обработанное"""
+        session = get_session()
+        try:
+            announcement = session.query(Announcement).filter(
+                Announcement.id == announcement_id
+            ).first()
+
+            if announcement:
+                announcement.is_processed = True
+                session.commit()
+                session.refresh(announcement)
+
+                # Синхронизация с Google Sheets
+                try:
+                    sheets_manager = get_sheets_manager()
+                    sheets_manager.update_announcement(announcement)
+                except Exception as e:
+                    from utils.logger import logger
+                    logger.error(f"Ошибка синхронизации с Google Sheets при обработке: {e}")
+        finally:
+            session.close()
+
 
 class ManagerActionCRUD:
     """CRUD операции для действий менеджеров"""
