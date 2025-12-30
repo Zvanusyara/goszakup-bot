@@ -24,6 +24,12 @@ def get_announcement_keyboard(announcement_id: int) -> InlineKeyboardMarkup:
                 text="❌ Отклонить",
                 callback_data=f"reject_{announcement_id}"
             )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⏸️ Отложить",
+                callback_data=f"postpone_{announcement_id}"
+            )
         ]
     ])
 
@@ -91,6 +97,14 @@ def get_work_announcements_keyboard(announcements: list) -> InlineKeyboardMarkup
             )
         ])
 
+    # Добавить кнопку "Назад"
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔙 Назад",
+            callback_data="close_message"
+        )
+    ])
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     return keyboard
 
@@ -151,12 +165,69 @@ def get_manager_main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📊 Статистика")
             ],
             [
+                KeyboardButton(text="🔔 Не принятые")
+            ],
+            [
                 KeyboardButton(text="ℹ️ Справка")
             ]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие..."
     )
+    return keyboard
+
+
+def get_pending_announcements_keyboard(announcements: list) -> InlineKeyboardMarkup:
+    """
+    Клавиатура со списком не принятых объявлений
+
+    Args:
+        announcements: Список объявлений
+
+    Returns:
+        InlineKeyboardMarkup с кнопками объявлений
+    """
+    buttons = []
+
+    for announcement in announcements:
+        # Короткий номер объявления для отображения
+        short_number = announcement.announcement_number[:20] + "..." if len(
+            announcement.announcement_number) > 20 else announcement.announcement_number
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🔔 {short_number}",
+                callback_data=f"pending_view_{announcement.id}"
+            )
+        ])
+
+    # Добавить кнопку "Назад"
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔙 Назад",
+            callback_data="close_message"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    return keyboard
+
+
+def get_stats_keyboard() -> InlineKeyboardMarkup:
+    """
+    Клавиатура для статистики менеджера
+
+    Returns:
+        InlineKeyboardMarkup с кнопкой "Назад"
+    """
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🔙 Назад",
+                callback_data="close_message"
+            )
+        ]
+    ])
     return keyboard
 
 
@@ -171,10 +242,6 @@ def get_admin_main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(text="👔 Админ-панель")
-            ],
-            [
-                KeyboardButton(text="📋 Объявления в работе"),
-                KeyboardButton(text="📊 Статистика")
             ],
             [
                 KeyboardButton(text="ℹ️ Справка")

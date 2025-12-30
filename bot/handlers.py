@@ -30,7 +30,8 @@ from bot.keyboards import (
     get_work_announcements_keyboard,
     get_announcement_actions_keyboard,
     get_manager_main_keyboard,
-    get_admin_main_keyboard
+    get_admin_main_keyboard,
+    get_announcement_keyboard
 )
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, MANAGERS
 from sqlalchemy import func
@@ -76,7 +77,6 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     keyboard = get_user_keyboard(message.from_user.id)
     await message.answer(HELP_MESSAGE, parse_mode='HTML', reply_markup=keyboard)
-    await message.answer(HELP_MESSAGE, parse_mode='HTML')
 
 
 @router.message(Command("stats"))
@@ -124,7 +124,9 @@ async def cmd_stats(message: Message):
             'rejected': rejected
         }
 
-        keyboard = get_user_keyboard(user_id)
+        # Используем inline клавиатуру с кнопкой "Назад"
+        from bot.keyboards import get_stats_keyboard
+        keyboard = get_stats_keyboard()
         await message.answer(format_stats_message(stats), parse_mode='HTML', reply_markup=keyboard)
 
     finally:
@@ -151,8 +153,13 @@ async def cmd_my_work(message: Message):
     announcements = AnnouncementCRUD.get_accepted_for_manager(manager_id)
 
     # Отправить список объявлений
-    # Инлайн-клавиатура для объявлений + reply-клавиатура для меню
-    inline_keyboard = get_work_announcements_keyboard(announcements) if announcements else None
+    # Инлайн-клавиатура для объявлений (всегда есть кнопка "Назад")
+    from bot.keyboards import get_work_announcements_keyboard, get_stats_keyboard
+    if announcements:
+        inline_keyboard = get_work_announcements_keyboard(announcements)
+    else:
+        # Если нет объявлений, все равно показываем кнопку "Назад"
+        inline_keyboard = get_stats_keyboard()
 
     await message.answer(
         format_work_announcements_list(announcements),
@@ -160,10 +167,48 @@ async def cmd_my_work(message: Message):
         reply_markup=inline_keyboard
     )
 
-    # Отправить reply-клавиатуру отдельным сообщением, если нужно
-    if not inline_keyboard:
-        keyboard = get_user_keyboard(user_id)
-        await message.answer("Используйте кнопки меню для навигации:", reply_markup=keyboard)
+
+@router.message(Command("pending"))
+async def cmd_pending(message: Message):
+    """Обработчик команды /pending - не принятые объявления"""
+    user_id = message.from_user.id
+
+    # Найти ID менеджера по Telegram ID
+    manager_id = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            break
+
+    if not manager_id:
+        await message.answer("❌ Вы не зарегистрированы как менеджер в системе.")
+        return
+
+    # Получить не принятые объявления из БД
+    session = get_session()
+    try:
+        announcements = session.query(Announcement).filter(
+            Announcement.manager_id == manager_id,
+            Announcement.status == 'pending'
+        ).order_by(Announcement.created_at.desc()).all()
+
+        # Отправить список объявлений
+        from bot.keyboards import get_pending_announcements_keyboard, get_stats_keyboard
+        from bot.messages import format_pending_announcements_list
+
+        if announcements:
+            inline_keyboard = get_pending_announcements_keyboard(announcements)
+        else:
+            # Если нет объявлений, все равно показываем кнопку "Назад"
+            inline_keyboard = get_stats_keyboard()
+
+        await message.answer(
+            format_pending_announcements_list(announcements),
+            parse_mode='HTML',
+            reply_markup=inline_keyboard
+        )
+    finally:
+        session.close()
 
 
 def get_admin_dashboard_data() -> dict:
@@ -626,6 +671,12 @@ async def button_stats(message: Message):
     await cmd_stats(message)
 
 
+@router.message(F.text == "🔔 Не принятые")
+async def button_pending(message: Message):
+    """Обработчик кнопки 'Не принятые'"""
+    await cmd_pending(message)
+
+
 @router.message(F.text == "ℹ️ Справка")
 async def button_help(message: Message):
     """Обработчик кнопки 'Справка'"""
@@ -636,6 +687,98 @@ async def button_help(message: Message):
 async def button_admin(message: Message):
     """Обработчик кнопки 'Админ-панель'"""
     await cmd_admin(message)
+
+
+@router.callback_query(F.data == "close_message")
+async def callback_close_message(callback: CallbackQuery):
+    """Обработчик кнопки 'Назад' - удаляет сообщение"""
+    try:
+        await callback.message.delete()
+        await callback.answer()
+    except Exception as e:
+        # Если не удалось удалить сообщение, просто отвечаем на callback
+        await callback.answer("Сообщение закрыто")
+
+
+@router.callback_query(F.data.startswith("pending_view_"))
+async def callback_pending_view(callback: CallbackQuery, bot: Bot):
+    """Обработчик просмотра не принятого объявления из списка"""
+    try:
+        announcement_id = int(callback.data.split("_")[2])
+        user_id = callback.from_user.id
+
+        # Найти ID менеджера по Telegram ID
+        manager_id = None
+        for mid, mdata in MANAGERS.items():
+            if mdata['telegram_id'] == user_id:
+                manager_id = mid
+                break
+
+        if not manager_id:
+            await callback.answer("❌ Вы не зарегистрированы как менеджер в системе.", show_alert=True)
+            return
+
+        # Получить объявление из БД
+        session = get_session()
+        try:
+            announcement = session.query(Announcement).filter(
+                Announcement.id == announcement_id,
+                Announcement.manager_id == manager_id,
+                Announcement.status == 'pending'
+            ).first()
+
+            if not announcement:
+                await callback.answer("❌ Объявление не найдено или уже обработано.", show_alert=True)
+                return
+
+            # Подготовить данные объявления для отправки
+            from bot.messages import format_announcement_message
+            announcement_data = {
+                'announcement_number': announcement.announcement_number,
+                'announcement_url': announcement.announcement_url,
+                'organization_name': announcement.organization_name,
+                'organization_bin': announcement.organization_bin,
+                'legal_address': announcement.legal_address,
+                'region': announcement.region,
+                'lot_name': announcement.lot_name,
+                'lot_description': announcement.lot_description,
+                'keyword_matched': announcement.keyword_matched,
+                'manager_id': announcement.manager_id,
+                'manager_name': announcement.manager_name
+            }
+
+            # Форматировать сообщение и добавить кнопки "Принять" и "Отклонить"
+            message_text = format_announcement_message(announcement_data, for_manager=True)
+            keyboard = get_announcement_keyboard(announcement.id)
+
+            # Отправить новое сообщение с объявлением через bot
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text=message_text,
+                parse_mode='HTML',
+                reply_markup=keyboard,
+                disable_web_page_preview=True
+            )
+
+            await callback.answer()
+
+        finally:
+            session.close()
+
+    except Exception as e:
+        print(f"❌ Ошибка в callback_pending_view: {e}")
+        await callback.answer("❌ Произошла ошибка при загрузке объявления.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("postpone_"))
+async def callback_postpone(callback: CallbackQuery):
+    """Обработчик кнопки 'Отложить' - удаляет сообщение"""
+    try:
+        await callback.message.delete()
+        await callback.answer("Объявление отложено")
+    except Exception as e:
+        print(f"❌ Ошибка при удалении сообщения: {e}")
+        await callback.answer("Объявление отложено", show_alert=False)
 
 
 def get_dispatcher() -> Dispatcher:

@@ -194,6 +194,28 @@ def format_work_announcements_list(announcements: list) -> str:
     return message
 
 
+def format_pending_announcements_list(announcements: list) -> str:
+    """
+    Форматирование списка не принятых объявлений
+
+    Args:
+        announcements: Список объявлений
+
+    Returns:
+        Отформатированное сообщение
+    """
+    if not announcements:
+        return (
+            "🔔 <b>Не принятые объявления</b>\n\n"
+            "У вас нет не принятых объявлений."
+        )
+
+    message = f"🔔 <b>Не принятые объявления</b> ({len(announcements)})\n\n"
+    message += "Выберите объявление для просмотра:\n\n"
+
+    return message
+
+
 def format_announcement_details(announcement) -> str:
     """
     Форматирование подробной информации об объявлении
