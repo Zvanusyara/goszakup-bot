@@ -28,6 +28,8 @@ class TelegramNotifier:
             announcement: Данные объявления
             announcement_db_id: ID объявления в базе данных
         """
+        print(f"📤 Попытка отправки уведомления менеджеру {announcement.get('manager_name', 'N/A')} (ID: {telegram_id})")
+
         message_text = format_announcement_message(announcement, for_manager=True)
         keyboard = get_announcement_keyboard(announcement_db_id)
 
@@ -39,11 +41,12 @@ class TelegramNotifier:
                 parse_mode='HTML',
                 disable_web_page_preview=True
             )
-            print(f"✅ Уведомление отправлено менеджеру (ID: {telegram_id})")
+            print(f"✅ Уведомление успешно отправлено менеджеру (ID: {telegram_id})")
             return True
 
         except Exception as e:
-            print(f"❌ Ошибка отправки менеджеру (ID: {telegram_id}): {e}")
+            print(f"❌ ОШИБКА отправки менеджеру (ID: {telegram_id}): {e}")
+            print(f"   ⚠️ Возможно, менеджер не запустил бота (/start)")
             return False
 
     async def send_to_admin(self, announcement: dict):

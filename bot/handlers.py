@@ -12,6 +12,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 
 from database.crud import AnnouncementCRUD, ManagerActionCRUD
 from database.models import get_session, Announcement
@@ -36,6 +37,22 @@ from bot.keyboards import (
 from config import TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID, MANAGERS
 from sqlalchemy import func
 from datetime import datetime, timedelta
+
+
+async def safe_callback_answer(callback: CallbackQuery, text: str = None, show_alert: bool = False):
+    """
+    Безопасный ответ на callback query с обработкой timeout ошибок
+    """
+    try:
+        await callback.answer(text=text, show_alert=show_alert)
+    except TelegramBadRequest as e:
+        if "query is too old" in str(e) or "query ID is invalid" in str(e):
+            # Игнорируем ошибки устаревших callback'ов
+            pass
+        else:
+            # Другие ошибки пробрасываем дальше
+            raise
+
 
 router = Router()
 
