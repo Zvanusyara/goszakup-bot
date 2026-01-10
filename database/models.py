@@ -34,10 +34,17 @@ class Announcement(Base):
     legal_address = Column(Text)
     region = Column(String(200), index=True)
 
-    # Данные лота
-    lot_name = Column(Text)
-    lot_description = Column(Text)
+    # Данные лота (для обратной совместимости - устаревшие поля)
+    lot_name = Column(Text, nullable=True)
+    lot_description = Column(Text, nullable=True)
     keyword_matched = Column(String(200))  # Ключевое слово, по которому найдено
+
+    # Массив лотов (JSON) - новый формат
+    lots = Column(Text, nullable=True)  # JSON массив лотов: [{"name": "...", "description": "...", "keyword": "..."}]
+
+    application_deadline = Column(DateTime, nullable=True)  # Срок окончания приема заявок
+    procurement_method = Column(String(200), nullable=True)  # Способ проведения закупки
+    participation_details = Column(Text, nullable=True)  # Информация о товаре для участия
 
     # Привязка к менеджеру
     manager_id = Column(Integer, index=True)
@@ -56,6 +63,9 @@ class Announcement(Base):
     # Уведомления
     notification_sent = Column(Boolean, default=False)
     admin_notified = Column(Boolean, default=False)
+    reminder_48h_sent = Column(Boolean, default=False)  # Напоминание за 48 часов
+    reminder_24h_sent = Column(Boolean, default=False)  # Напоминание за 24 часа
+    reminder_2h_sent = Column(Boolean, default=False)   # Напоминание за 2 часа
 
     # Связь с действиями
     actions = relationship("ManagerAction", back_populates="announcement", cascade="all, delete-orphan")

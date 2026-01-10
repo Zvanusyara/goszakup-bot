@@ -4,7 +4,7 @@
 """
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 import gspread
 from google.oauth2.service_account import Credentials
@@ -31,25 +31,19 @@ class GoogleSheetsManager:
 
     # Заголовки столбцов в Google Sheets
     HEADERS = [
-        'ID',
-        'Дата создания',
+        'Дата добавления',
+        'Дата окончания приема заявок',
         'Номер объявления',
         'Ссылка',
         'Организация',
-        'БИН',
-        'Юридический адрес',
         'Регион',
-        'Название лота',
-        'Описание лота',
-        'Ключевое слово',
-        'ID менеджера',
+        'Лоты',
+        'Ключевые слова',
         'Менеджер',
         'Статус',
         'Причина отказа',
-        'Дата обновления',
-        'Дата ответа',
-        'Уведомление отправлено',
-        'Админ уведомлен'
+        'Детали участия',
+        'Дата ответа'
     ]
 
     def __init__(self):
@@ -110,11 +104,16 @@ class GoogleSheetsManager:
             existing_headers = self.worksheet.row_values(1)
 
             if not existing_headers or existing_headers != self.HEADERS:
-                # Установка заголовков
+                # Очистка всей первой строки (удаление старых заголовков)
+                self.worksheet.batch_clear(['1:1'])
+
+                # Установка новых заголовков
                 self.worksheet.update('A1', [self.HEADERS])
 
                 # Форматирование заголовков (жирный шрифт, фон)
-                self.worksheet.format('A1:S1', {
+                # Диапазон зависит от количества столбцов
+                header_range = f'A1:{chr(64 + len(self.HEADERS))}1'
+                self.worksheet.format(header_range, {
                     'backgroundColor': {
                         'red': 0.27,
                         'green': 0.45,
@@ -136,10 +135,32 @@ class GoogleSheetsManager:
                 # Заморозить первую строку
                 self.worksheet.freeze(rows=1)
 
+                # Удалить лишние столбцы если их больше чем нужно
+                current_col_count = self.worksheet.col_count
+                needed_col_count = len(self.HEADERS)
+                if current_col_count > needed_col_count:
+                    # Удаляем столбцы справа от нужного количества
+                    self.worksheet.delete_columns(needed_col_count + 1, current_col_count)
+                    logger.info(f"Удалено {current_col_count - needed_col_count} лишних столбцов")
+
                 logger.info("Заголовки инициализированы")
 
         except Exception as e:
             logger.error(f"Ошибка инициализации заголовков: {e}")
+
+    def _utc_to_local(self, utc_dt: datetime) -> datetime:
+        """
+        Конвертация UTC времени в местное время Казахстана (UTC+5)
+
+        Args:
+            utc_dt: Время в UTC
+
+        Returns:
+            Время в часовом поясе Казахстана
+        """
+        if utc_dt:
+            return utc_dt + timedelta(hours=5)
+        return None
 
     def _announcement_to_row(self, announcement) -> List[Any]:
         """
@@ -151,26 +172,61 @@ class GoogleSheetsManager:
         Returns:
             Список значений для строки
         """
+        import json
+
+        # Конвертируем UTC время в местное время Казахстана
+        created_at_local = self._utc_to_local(announcement.created_at)
+        response_at_local = self._utc_to_local(announcement.response_at)
+
+        # ВАЖНО: application_deadline уже приходит в местном времени Казахстана из API
+        # поэтому НЕ применяем _utc_to_local()
+        application_deadline_str = ''
+        if announcement.application_deadline:
+            application_deadline_str = announcement.application_deadline.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Форматируем лоты для Google Sheets (через перенос строки)
+        lots_str = ''
+        keywords_str = announcement.keyword_matched or ''
+
+        if announcement.lots:
+            try:
+                # Десериализуем JSON
+                lots_data = json.loads(announcement.lots) if isinstance(announcement.lots, str) else announcement.lots
+
+                if lots_data and isinstance(lots_data, list):
+                    # Форматируем каждый лот
+                    lot_lines = []
+                    for i, lot in enumerate(lots_data, 1):
+                        lot_number = lot.get('number')  # Реальный номер лота
+                        lot_name = lot.get('name', 'N/A')
+
+                        # Используем реальный номер лота если есть, иначе порядковый
+                        lot_display = f"№{lot_number}" if lot_number else f"{i}"
+                        lot_lines.append(f"ЛОТ {lot_display}: {lot_name}")
+
+                    # Объединяем через перенос строки
+                    lots_str = '\n'.join(lot_lines)
+            except:
+                # Фолбэк на старый формат
+                lots_str = announcement.lot_name or ''
+        else:
+            # Старый формат - один лот
+            lots_str = announcement.lot_name or ''
+
         return [
-            announcement.id,
-            announcement.created_at.strftime('%Y-%m-%d %H:%M:%S') if announcement.created_at else '',
+            created_at_local.strftime('%Y-%m-%d %H:%M:%S') if created_at_local else '',
+            application_deadline_str,
             announcement.announcement_number or '',
             announcement.announcement_url or '',
             announcement.organization_name or '',
-            announcement.organization_bin or '',
-            announcement.legal_address or '',
             announcement.region or '',
-            announcement.lot_name or '',
-            announcement.lot_description or '',
-            announcement.keyword_matched or '',
-            announcement.manager_id or '',
+            lots_str,
+            keywords_str,
             announcement.manager_name or '',
             self._format_status(announcement.status),
             announcement.rejection_reason or '',
-            announcement.updated_at.strftime('%Y-%m-%d %H:%M:%S') if announcement.updated_at else '',
-            announcement.response_at.strftime('%Y-%m-%d %H:%M:%S') if announcement.response_at else '',
-            'Да' if announcement.notification_sent else 'Нет',
-            'Да' if announcement.admin_notified else 'Нет'
+            announcement.participation_details or '',
+            response_at_local.strftime('%Y-%m-%d %H:%M:%S') if response_at_local else ''
         ]
 
     def _format_status(self, status: str) -> str:
@@ -182,29 +238,29 @@ class GoogleSheetsManager:
         }
         return status_map.get(status, status)
 
-    def _find_row_by_id(self, announcement_id: int) -> Optional[int]:
+    def _find_row_by_number(self, announcement_number: str) -> Optional[int]:
         """
-        Найти номер строки по ID объявления
+        Найти номер строки по номеру объявления
 
         Args:
-            announcement_id: ID объявления
+            announcement_number: Номер объявления
 
         Returns:
             Номер строки или None
         """
         try:
-            # Получить все значения из столбца A (ID)
-            id_column = self.worksheet.col_values(1)
+            # Получить все значения из столбца C (Номер объявления)
+            number_column = self.worksheet.col_values(3)
 
-            # Найти строку с нужным ID
-            for idx, cell_value in enumerate(id_column[1:], start=2):  # Пропускаем заголовок
-                if cell_value and int(cell_value) == announcement_id:
+            # Найти строку с нужным номером объявления
+            for idx, cell_value in enumerate(number_column[1:], start=2):  # Пропускаем заголовок
+                if cell_value and cell_value == announcement_number:
                     return idx
 
             return None
 
         except Exception as e:
-            logger.error(f"Ошибка поиска строки по ID {announcement_id}: {e}")
+            logger.error(f"Ошибка поиска строки по номеру {announcement_number}: {e}")
             return None
 
     def add_announcement(self, announcement) -> bool:
@@ -222,9 +278,9 @@ class GoogleSheetsManager:
 
         try:
             # Проверка, не добавлено ли уже это объявление
-            existing_row = self._find_row_by_id(announcement.id)
+            existing_row = self._find_row_by_number(announcement.announcement_number)
             if existing_row:
-                logger.warning(f"Объявление {announcement.id} уже существует в строке {existing_row}")
+                logger.warning(f"Объявление {announcement.announcement_number} уже существует в строке {existing_row}")
                 return self.update_announcement(announcement)
 
             # Преобразование объявления в строку
@@ -237,11 +293,11 @@ class GoogleSheetsManager:
             row_number = len(self.worksheet.col_values(1))
             self._apply_status_formatting(row_number, announcement.status)
 
-            logger.info(f"Объявление {announcement.id} добавлено в Google Sheets")
+            logger.info(f"Объявление {announcement.announcement_number} добавлено в Google Sheets")
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка добавления объявления {announcement.id} в Google Sheets: {e}")
+            logger.error(f"Ошибка добавления объявления {announcement.announcement_number} в Google Sheets: {e}")
             return False
 
     def update_announcement(self, announcement) -> bool:
@@ -259,27 +315,27 @@ class GoogleSheetsManager:
 
         try:
             # Найти строку с этим объявлением
-            row_number = self._find_row_by_id(announcement.id)
+            row_number = self._find_row_by_number(announcement.announcement_number)
 
             if not row_number:
-                logger.warning(f"Объявление {announcement.id} не найдено в Google Sheets, добавляем")
+                logger.warning(f"Объявление {announcement.announcement_number} не найдено в Google Sheets, добавляем")
                 return self.add_announcement(announcement)
 
             # Преобразование объявления в строку
             row_data = self._announcement_to_row(announcement)
 
-            # Обновление строки
-            range_name = f'A{row_number}:S{row_number}'
+            # Обновление строки (столбцы A-M: 13 столбцов)
+            range_name = f'A{row_number}:M{row_number}'
             self.worksheet.update(range_name, [row_data], value_input_option='USER_ENTERED')
 
             # Применение цветового кодирования статуса
             self._apply_status_formatting(row_number, announcement.status)
 
-            logger.info(f"Объявление {announcement.id} обновлено в Google Sheets (строка {row_number})")
+            logger.info(f"Объявление {announcement.announcement_number} обновлено в Google Sheets (строка {row_number})")
             return True
 
         except Exception as e:
-            logger.error(f"Ошибка обновления объявления {announcement.id} в Google Sheets: {e}")
+            logger.error(f"Ошибка обновления объявления {announcement.announcement_number} в Google Sheets: {e}")
             return False
 
     def _apply_status_formatting(self, row_number: int, status: str):
@@ -314,8 +370,12 @@ class GoogleSheetsManager:
                     'blue': 0.61
                 }
 
-            # Применение цвета к столбцу статуса (столбец N)
-            range_name = f'N{row_number}'
+            # Найти позицию столбца "Статус" в заголовках
+            status_column_index = self.HEADERS.index('Статус') + 1  # +1 так как индексация с 1
+            status_column_letter = chr(64 + status_column_index)  # A=65, поэтому 64+1=A
+
+            # Применение цвета к столбцу статуса
+            range_name = f'{status_column_letter}{row_number}'
             self.worksheet.format(range_name, {
                 'backgroundColor': color
             })
@@ -339,20 +399,18 @@ class GoogleSheetsManager:
         stats = {'added': 0, 'updated': 0, 'errors': 0}
 
         try:
-            # Получить все существующие ID
-            existing_ids = set()
-            id_column = self.worksheet.col_values(1)
-            for cell_value in id_column[1:]:  # Пропускаем заголовок
+            # Получить все существующие номера объявлений
+            existing_numbers = set()
+            number_column = self.worksheet.col_values(3)  # Столбец C - Номер объявления
+
+            for cell_value in number_column[1:]:  # Пропускаем заголовок
                 if cell_value:
-                    try:
-                        existing_ids.add(int(cell_value))
-                    except ValueError:
-                        pass
+                    existing_numbers.add(cell_value)
 
             # Обработка каждого объявления
             for announcement in announcements:
                 try:
-                    if announcement.id in existing_ids:
+                    if announcement.announcement_number in existing_numbers:
                         if self.update_announcement(announcement):
                             stats['updated'] += 1
                         else:
@@ -363,7 +421,7 @@ class GoogleSheetsManager:
                         else:
                             stats['errors'] += 1
                 except Exception as e:
-                    logger.error(f"Ошибка синхронизации объявления {announcement.id}: {e}")
+                    logger.error(f"Ошибка синхронизации объявления {announcement.announcement_number}: {e}")
                     stats['errors'] += 1
 
             logger.success(

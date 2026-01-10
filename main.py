@@ -3,13 +3,13 @@
 """
 import asyncio
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import TELEGRAM_BOT_TOKEN, PARSE_INTERVAL_HOURS, ALL_KEYWORDS
-from database.models import init_database
+from config import TELEGRAM_BOT_TOKEN, PARSE_INTERVAL_HOURS, ALL_KEYWORDS, MANAGERS
+from database.models import init_database, get_session, Announcement
 from database.crud import AnnouncementCRUD, ParsingLogCRUD
 from parsers.goszakup import GoszakupParser
 from parsers.matcher import ManagerMatcher
@@ -37,56 +37,68 @@ class GoszakupMonitoringSystem:
         log = ParsingLogCRUD.create()
 
         try:
-            # Парсинг лотов
-            found_lots = self.parser.search_lots(ALL_KEYWORDS, days_back=7)
+            # Парсинг объявлений (проверяем только за последние сутки)
+            found_announcements = self.parser.search_lots(ALL_KEYWORDS, days_back=1)
 
-            total_found = len(found_lots)
+            total_found = len(found_announcements)
             new_added = 0
             duplicates = 0
 
-            logger.info(f"📊 Найдено лотов: {total_found}")
+            logger.info(f"📊 Найдено объявлений: {total_found}")
 
-            for lot_data in found_lots:
-                # Проверить на дубликат
-                if AnnouncementCRUD.exists(lot_data['announcement_number']):
+            for announcement_data in found_announcements:
+                # Логируем количество лотов
+                lots = announcement_data.get('lots', [])
+                lot_count = len(lots) if lots else 1
+                logger.info(f"📦 Объявление {announcement_data['announcement_number']}: {lot_count} лот(ов)")
+
+                # Проверить на дубликат (не выводим в лог каждый дубликат)
+                if AnnouncementCRUD.exists(announcement_data['announcement_number']):
                     duplicates += 1
-                    logger.debug(f"⏭️ Пропуск дубликата: {lot_data['announcement_number']}")
                     continue
 
-                # Найти менеджера
-                manager_info = self.matcher.find_manager(lot_data)
+                # Найти всех подходящих менеджеров
+                managers_info = self.matcher.find_managers(announcement_data)
 
-                if not manager_info:
-                    logger.warning(f"⚠️ Менеджер не найден для региона: {lot_data['region']}")
+                if not managers_info:
+                    logger.warning(f"⚠️ Менеджеры не найдены для региона: {announcement_data['region']}")
                     continue
 
-                # Добавить информацию о менеджере к данным
-                lot_data['manager_id'] = manager_info['manager_id']
-                lot_data['manager_name'] = manager_info['manager_name']
+                # Проверяем, сколько менеджеров найдено
+                is_shared = len(managers_info) > 1
+
+                if is_shared:
+                    # Объявление для нескольких менеджеров (Алматы) - не устанавливаем manager_id
+                    logger.info(f"📋 Общее объявление для {len(managers_info)} менеджеров (Алматы)")
+                    announcement_data['manager_id'] = None
+                    announcement_data['manager_name'] = None
+                else:
+                    # Объявление для одного менеджера
+                    manager_info = managers_info[0]
+                    announcement_data['manager_id'] = manager_info['manager_id']
+                    announcement_data['manager_name'] = manager_info['manager_name']
 
                 # Сохранить в БД
-                announcement = AnnouncementCRUD.create(lot_data)
+                announcement = AnnouncementCRUD.create(announcement_data)
                 new_added += 1
 
                 logger.info(f"✅ Новое объявление добавлено: {announcement.announcement_number}")
 
-                # Отправить уведомление менеджеру
-                await self.notifier.send_to_manager(
-                    telegram_id=manager_info['telegram_id'],
-                    announcement=lot_data,
-                    announcement_db_id=announcement.id
-                )
-
-                # Отправить уведомление админу
-                await self.notifier.send_to_admin(lot_data)
-
-                # Небольшая задержка между уведомлениями
-                await asyncio.sleep(1)
+                # Отправить уведомления всем подходящим менеджерам
+                for manager_info in managers_info:
+                    await self.notifier.send_to_manager(
+                        telegram_id=manager_info['telegram_id'],
+                        announcement=announcement_data,
+                        announcement_db_id=announcement.id,
+                        is_shared=is_shared
+                    )
+                    # Небольшая задержка между уведомлениями
+                    await asyncio.sleep(1)
 
             # Обновить лог парсинга
             ParsingLogCRUD.update(
                 log.id,
-                finished_at=datetime.utcnow(),
+                finished_at=datetime.now(timezone.utc),
                 total_found=total_found,
                 new_added=new_added,
                 duplicates=duplicates,
@@ -101,14 +113,95 @@ class GoszakupMonitoringSystem:
             # Обновить лог с ошибкой
             ParsingLogCRUD.update(
                 log.id,
-                finished_at=datetime.utcnow(),
+                finished_at=datetime.now(timezone.utc),
                 status='failed',
                 error_message=str(e)
             )
 
+    async def check_deadlines(self):
+        """Проверка дедлайнов и отправка напоминаний"""
+        logger.info("⏰ Проверка дедлайнов...")
+
+        # Текущее время (UTC)
+        now = datetime.now(timezone.utc)
+
+        # Время Астаны (UTC+5)
+        kazakhstan_time = now + timedelta(hours=5)
+        current_hour = kazakhstan_time.hour
+
+        # Не отправлять уведомления ночью (с 23:00 до 8:00)
+        if current_hour >= 23 or current_hour < 8:
+            logger.info(f"⏸️ Ночное время ({current_hour:02d}:00 по Астане), напоминания не отправляются")
+            return
+
+        session = get_session()
+        try:
+            # Получить все принятые объявления с дедлайном
+            announcements = session.query(Announcement).filter(
+                Announcement.status == 'accepted',
+                Announcement.application_deadline.isnot(None),
+                Announcement.manager_id.isnot(None)
+            ).all()
+
+            reminders_sent = 0
+
+            for announcement in announcements:
+                # Вычислить время до дедлайна
+                time_left = announcement.application_deadline - now
+                hours_left = time_left.total_seconds() / 3600
+
+                # Пропустить уже прошедшие дедлайны
+                if hours_left < 0:
+                    continue
+
+                # Получить telegram_id менеджера
+                manager_id = announcement.manager_id
+                if manager_id not in MANAGERS:
+                    continue
+
+                telegram_id = MANAGERS[manager_id]['telegram_id']
+                if not telegram_id:
+                    continue
+
+                # Определить, какое напоминание отправить
+                reminder_sent = False
+
+                # Напоминание за 48 часов
+                if 47 <= hours_left <= 49 and not announcement.reminder_48h_sent:
+                    await self.notifier.send_deadline_reminder(telegram_id, announcement, 48)
+                    announcement.reminder_48h_sent = True
+                    reminder_sent = True
+                    reminders_sent += 1
+
+                # Напоминание за 24 часа
+                elif 23 <= hours_left <= 25 and not announcement.reminder_24h_sent:
+                    await self.notifier.send_deadline_reminder(telegram_id, announcement, 24)
+                    announcement.reminder_24h_sent = True
+                    reminder_sent = True
+                    reminders_sent += 1
+
+                # Напоминание за 2 часа
+                elif 1.5 <= hours_left <= 2.5 and not announcement.reminder_2h_sent:
+                    await self.notifier.send_deadline_reminder(telegram_id, announcement, 2)
+                    announcement.reminder_2h_sent = True
+                    reminder_sent = True
+                    reminders_sent += 1
+
+                if reminder_sent:
+                    session.commit()
+                    await asyncio.sleep(1)  # Задержка между уведомлениями
+
+            logger.info(f"✅ Проверка дедлайнов завершена. Отправлено напоминаний: {reminders_sent}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при проверке дедлайнов: {e}")
+            session.rollback()
+        finally:
+            session.close()
+
     async def start_parsing_schedule(self):
-        """Запустить планировщик парсинга"""
-        # Добавить задачу в планировщик
+        """Запустить планировщик парсинга и проверки дедлайнов"""
+        # Добавить задачу парсинга в планировщик
         self.scheduler.add_job(
             self.parse_and_notify,
             'interval',
@@ -117,13 +210,25 @@ class GoszakupMonitoringSystem:
             replace_existing=True
         )
 
+        # Добавить задачу проверки дедлайнов (каждый час)
+        self.scheduler.add_job(
+            self.check_deadlines,
+            'interval',
+            hours=1,
+            id='check_deadlines',
+            replace_existing=True
+        )
+
         # Запустить парсинг сразу при старте
         await self.parse_and_notify()
+
+        # Запустить проверку дедлайнов сразу при старте
+        await self.check_deadlines()
 
         # Запустить планировщик
         self.scheduler.start()
 
-        logger.info(f"⏰ Планировщик запущен. Интервал: 1 минута (тестовый режим)")
+        logger.info(f"⏰ Планировщик запущен. Парсинг: каждую 1 мин, проверка дедлайнов: каждый час")
 
     async def start(self):
         """Запуск системы"""

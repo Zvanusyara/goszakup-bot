@@ -1,9 +1,10 @@
 """
 CRUD операции для работы с базой данных
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import and_, or_, desc
 from typing import Optional, List
+import json
 import sys
 import os
 
@@ -22,7 +23,12 @@ class AnnouncementCRUD:
         """Создать новое объявление"""
         session = get_session()
         try:
-            announcement = Announcement(**announcement_data)
+            # Сериализуем массив лотов в JSON, если есть
+            data = announcement_data.copy()
+            if 'lots' in data and isinstance(data['lots'], list):
+                data['lots'] = json.dumps(data['lots'], ensure_ascii=False)
+
+            announcement = Announcement(**data)
             session.add(announcement)
             session.commit()
             session.refresh(announcement)
@@ -73,7 +79,7 @@ class AnnouncementCRUD:
 
             if announcement:
                 announcement.status = status
-                announcement.response_at = datetime.utcnow()
+                announcement.response_at = datetime.now(timezone.utc)
                 if rejection_reason:
                     announcement.rejection_reason = rejection_reason
                 session.commit()
@@ -171,6 +177,178 @@ class AnnouncementCRUD:
                 except Exception as e:
                     from utils.logger import logger
                     logger.error(f"Ошибка синхронизации с Google Sheets при обработке: {e}")
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_manager_statistics(manager_id: int) -> dict:
+        """
+        Получить статистику для конкретного менеджера
+
+        Args:
+            manager_id: ID менеджера
+
+        Returns:
+            Словарь со статистикой: total, pending, accepted, processed, rejected,
+            acceptance_rate, processing_rate, avg_response_time
+        """
+        session = get_session()
+        try:
+            from datetime import timedelta
+
+            # Общее количество
+            total = session.query(Announcement).filter(
+                Announcement.manager_id == manager_id
+            ).count()
+
+            # По статусам
+            pending = session.query(Announcement).filter(
+                Announcement.manager_id == manager_id,
+                Announcement.status == 'pending'
+            ).count()
+
+            accepted = session.query(Announcement).filter(
+                Announcement.manager_id == manager_id,
+                Announcement.status == 'accepted'
+            ).count()
+
+            processed = session.query(Announcement).filter(
+                Announcement.manager_id == manager_id,
+                Announcement.status == 'accepted',
+                Announcement.is_processed == True
+            ).count()
+
+            rejected = session.query(Announcement).filter(
+                Announcement.manager_id == manager_id,
+                Announcement.status == 'rejected'
+            ).count()
+
+            # Процент принятия (accepted / (accepted + rejected))
+            total_responded = accepted + rejected
+            acceptance_rate = (accepted / total_responded * 100) if total_responded > 0 else 0
+
+            # Процент обработки (processed / accepted)
+            processing_rate = (processed / accepted * 100) if accepted > 0 else 0
+
+            # Среднее время реакции (для объявлений с ответом)
+            announcements_with_response = session.query(Announcement).filter(
+                Announcement.manager_id == manager_id,
+                Announcement.response_at.isnot(None)
+            ).all()
+
+            if announcements_with_response:
+                total_response_time = sum([
+                    (ann.response_at - ann.created_at).total_seconds() / 3600
+                    for ann in announcements_with_response
+                ])
+                avg_response_time = total_response_time / len(announcements_with_response)
+            else:
+                avg_response_time = 0
+
+            return {
+                'total': total,
+                'pending': pending,
+                'accepted': accepted,
+                'processed': processed,
+                'rejected': rejected,
+                'acceptance_rate': round(acceptance_rate, 1),
+                'processing_rate': round(processing_rate, 1),
+                'avg_response_time': round(avg_response_time, 1)
+            }
+
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_problem_announcements(manager_id: int) -> dict:
+        """
+        Получить проблемные объявления менеджера
+
+        Args:
+            manager_id: ID менеджера
+
+        Returns:
+            Словарь с ключами pending_24h (список объявлений pending > 24ч)
+            и accepted_48h (список объявлений accepted не обработаны > 48ч)
+        """
+        session = get_session()
+        try:
+            from datetime import timedelta
+
+            now = datetime.now(timezone.utc)
+
+            # Pending более 24 часов
+            pending_24h_threshold = now - timedelta(hours=24)
+            pending_24h = session.query(Announcement).filter(
+                and_(
+                    Announcement.manager_id == manager_id,
+                    Announcement.status == 'pending',
+                    Announcement.created_at < pending_24h_threshold
+                )
+            ).order_by(Announcement.created_at).all()
+
+            # Accepted но не обработаны более 48 часов
+            accepted_48h_threshold = now - timedelta(hours=48)
+            accepted_48h = session.query(Announcement).filter(
+                and_(
+                    Announcement.manager_id == manager_id,
+                    Announcement.status == 'accepted',
+                    Announcement.is_processed == False,
+                    Announcement.response_at < accepted_48h_threshold
+                )
+            ).order_by(Announcement.response_at).all()
+
+            return {
+                'pending_24h': pending_24h,
+                'accepted_48h': accepted_48h
+            }
+
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_active_announcements(manager_id: int) -> List[Announcement]:
+        """
+        Получить активные объявления менеджера (accepted и не обработаны)
+
+        Args:
+            manager_id: ID менеджера
+
+        Returns:
+            Список активных объявлений
+        """
+        session = get_session()
+        try:
+            return session.query(Announcement).filter(
+                and_(
+                    Announcement.manager_id == manager_id,
+                    Announcement.status == 'accepted',
+                    Announcement.is_processed == False
+                )
+            ).order_by(Announcement.created_at).all()
+
+        finally:
+            session.close()
+
+    @staticmethod
+    def get_accepted_with_valid_deadline() -> List[Announcement]:
+        """
+        Получить все принятые объявления, срок окончания которых еще не наступил
+        (для координатора)
+
+        Returns:
+            Список объявлений со статусом accepted и deadline_at > now
+        """
+        session = get_session()
+        try:
+            now = datetime.now(timezone.utc)
+            return session.query(Announcement).filter(
+                and_(
+                    Announcement.status == 'accepted',
+                    Announcement.deadline_at > now
+                )
+            ).order_by(desc(Announcement.deadline_at)).all()
+
         finally:
             session.close()
 
