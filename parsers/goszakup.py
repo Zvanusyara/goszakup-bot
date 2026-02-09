@@ -12,7 +12,10 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import GOSZAKUP_API_URL, GOSZAKUP_API_TOKEN, ALL_KEYWORDS, RESULTS_PER_PAGE
+from config import (
+    GOSZAKUP_API_URL, GOSZAKUP_GRAPHQL_V3_URL, GOSZAKUP_API_TOKEN,
+    ALL_KEYWORDS, RESULTS_PER_PAGE, KEYWORDS_BATCH_SIZE, MAX_PAGES_PER_SEARCH
+)
 
 
 class GoszakupParser:
@@ -57,6 +60,7 @@ class GoszakupParser:
 
     def __init__(self):
         self.graphql_url = GOSZAKUP_API_URL
+        self.graphql_v3_url = GOSZAKUP_GRAPHQL_V3_URL
         self.rest_api_base = "https://ows.goszakup.gov.kz/v3"
         self.session = requests.Session()
 
@@ -72,9 +76,13 @@ class GoszakupParser:
 
         self.session.headers.update(headers)
 
+        # Кеш адресов по БИН (в рамках одного запуска)
+        self._address_cache = {}
+
     def search_lots(self, keywords: List[str], days_back: int = 7) -> List[Dict]:
         """
-        Поиск лотов по ключевым словам за последние N дней
+        Поиск лотов по ключевым словам через GraphQL API v3 с фильтром nameDescriptionRu.
+        Поддерживает морфологический поиск на стороне сервера.
 
         Args:
             keywords: Список ключевых слов для поиска
@@ -83,56 +91,269 @@ class GoszakupParser:
         Returns:
             Список найденных объявлений с массивами лотов
         """
-        print(f"🔍 Поиск лотов по ключевым словам: {', '.join(keywords)}")
+        print(f"🔍 Поиск лотов через GraphQL v3 (nameDescriptionRu)")
+        print(f"   Ключевых слов: {len(keywords)}")
+        print(f"   Макс. страниц на ключевое слово: {MAX_PAGES_PER_SEARCH}")
+        print(f"   Фильтр по дате: последние {days_back} дней")
 
-        start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-        found_lots = []
+        # Собираем все лоты, дедупликация по lot_id
+        seen_lot_ids = set()
+        all_lots = []
 
-        # Используем REST API v3 для поиска лотов
-        # Endpoint: /lots
-        lots_url = f"{self.rest_api_base}/lots"
+        for kw_idx, keyword in enumerate(keywords):
+            print(f"\n🔑 Ключевое слово {kw_idx + 1}/{len(keywords)}: '{keyword}'")
 
-        params = {
-            'limit': RESULTS_PER_PAGE,
-            'offset': 0,
-            'start_date': start_date  # Добавляем дату начала
+            try:
+                kw_lots = self._search_lots_graphql_keyword(keyword, seen_lot_ids)
+                all_lots.extend(kw_lots)
+                print(f"   Найдено новых лотов: {len(kw_lots)}")
+            except Exception as e:
+                print(f"   ❌ Ошибка для '{keyword}': {e}")
+
+            # Rate limiting между запросами
+            if kw_idx < len(keywords) - 1:
+                time.sleep(0.3)
+
+        print(f"\n📊 Итого уникальных лотов: {len(all_lots)}")
+
+        # Фильтрация по дате ПЕРЕД группировкой
+        filtered_lots = self._filter_lots_by_date(all_lots, days_back)
+        print(f"🗓️ После фильтрации по дате: {len(filtered_lots)} лотов")
+
+        # Группируем лоты по объявлениям
+        announcements = self._group_lots_by_announcement(filtered_lots)
+        print(f"📦 Сгруппировано в объявлений: {len(announcements)}")
+
+        return announcements
+
+    def _search_lots_graphql_keyword(self, keyword: str, seen_lot_ids: set) -> List[Dict]:
+        """
+        Поиск лотов через GraphQL v3 для одного ключевого слова.
+        Использует курсорную пагинацию через after.
+
+        Args:
+            keyword: Ключевое слово для поиска (nameDescriptionRu принимает String)
+            seen_lot_ids: Множество уже найденных lot_id для дедупликации
+
+        Returns:
+            Список найденных лотов
+        """
+        query = """
+        query($filter: LotsFiltersInput, $limit: Int, $after: Int) {
+            Lots(filter: $filter, limit: $limit, after: $after) {
+                id
+                lotNumber
+                nameRu
+                descriptionRu
+                amount
+                customerBin
+                customerNameRu
+                trdBuyNumberAnno
+                trdBuyId
+                refLotStatusId
+                TrdBuy {
+                    id
+                    numberAnno
+                    nameRu
+                    totalSum
+                    refTradeMethodsId
+                    startDate
+                    endDate
+                    customerBin
+                    customerNameRu
+                    refBuyStatusId
+                    kato
+                }
+            }
         }
+        """
 
-        try:
-            response = self.session.get(lots_url, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+        found_lots = []
+        last_id = 0
 
-            if 'items' in data:
-                for lot in data['items']:
-                    # Проверяем наличие ключевых слов в названии лота
-                    lot_name = lot.get('name_ru', '').lower()
-                    lot_desc = lot.get('description_ru', '').lower()
+        for page in range(MAX_PAGES_PER_SEARCH):
+            variables = {
+                "filter": {
+                    "nameDescriptionRu": keyword
+                },
+                "limit": RESULTS_PER_PAGE
+            }
 
-                    matched_keyword = None
-                    for keyword in keywords:
-                        if keyword.lower() in lot_name or keyword.lower() in lot_desc:
-                            matched_keyword = keyword
-                            break
+            if last_id > 0:
+                variables["after"] = last_id
 
-                    if matched_keyword:
-                        # Извлекаем данные лота
-                        lot_data = self._extract_lot_data(lot, matched_keyword)
-                        if lot_data:
-                            found_lots.append(lot_data)
-                            print(f"✅ Найден лот: {lot_data['lot_name'][:50]}...")
+            try:
+                response = self.session.post(
+                    self.graphql_v3_url,
+                    json={'query': query, 'variables': variables},
+                    timeout=30
+                )
 
-            print(f"📊 Всего найдено лотов: {len(found_lots)}")
+                if response.status_code == 401:
+                    print(f"   ⚠️ Требуется авторизация. Проверьте GOSZAKUP_API_TOKEN в .env")
+                    break
 
-            # Группируем лоты по announcement_number
-            announcements = self._group_lots_by_announcement(found_lots)
-            print(f"📦 Сгруппировано в объявлений: {len(announcements)}")
+                response.raise_for_status()
+                data = response.json()
 
-            return announcements
+                if 'errors' in data:
+                    print(f"   ⚠️ GraphQL ошибки: {data['errors']}")
+                    break
 
-        except requests.RequestException as e:
-            print(f"❌ Ошибка при поиске лотов: {e}")
-            return []
+                lots = data.get('data', {}).get('Lots', [])
+
+                if not lots:
+                    print(f"   📭 Страница {page + 1}: пусто, завершаем")
+                    break
+
+                print(f"   📄 Страница {page + 1}: получено {len(lots)} лотов")
+
+                new_in_page = 0
+                for lot in lots:
+                    lot_id = lot.get('id')
+                    if not lot_id:
+                        continue
+
+                    # Обновляем курсор для следующей страницы
+                    last_id = lot_id
+
+                    # Дедупликация
+                    if lot_id in seen_lot_ids:
+                        continue
+                    seen_lot_ids.add(lot_id)
+
+                    # Определяем совпавшее ключевое слово
+                    lot_name = lot.get('nameRu', '') or ''
+                    lot_desc = lot.get('descriptionRu', '') or ''
+                    trd_buy = lot.get('TrdBuy') or {}
+                    announcement_name = trd_buy.get('nameRu', '') or ''
+
+                    matched_keyword = self._find_matched_keyword(
+                        [keyword], lot_name, lot_desc, announcement_name
+                    ) or keyword
+
+                    # Получаем данные для результата
+                    trd_buy_id = lot.get('trdBuyId') or trd_buy.get('id')
+                    customer_bin = lot.get('customerBin') or trd_buy.get('customerBin') or ''
+                    customer_name = lot.get('customerNameRu') or trd_buy.get('customerNameRu') or 'N/A'
+                    number_anno = lot.get('trdBuyNumberAnno') or trd_buy.get('numberAnno') or 'N/A'
+
+                    # Получаем адрес по БИН
+                    legal_address = self.get_customer_address(customer_bin) if customer_bin else 'Не указан'
+
+                    # Определяем регион
+                    region = self._extract_region(legal_address)
+                    if region in ['Другой регион', 'Не указан']:
+                        kato_list = trd_buy.get('kato') or []
+                        kato_code = str(kato_list[0]) if kato_list else ''
+                        if kato_code:
+                            region = self._extract_region_from_kato(str(kato_code))
+
+                    # Получаем срок и метод закупки из TrdBuy
+                    application_deadline = None
+                    end_date_str = trd_buy.get('endDate')
+                    if end_date_str:
+                        try:
+                            from dateutil import parser as date_parser
+                            application_deadline = date_parser.parse(end_date_str)
+                        except Exception:
+                            pass
+
+                    trade_method_id = trd_buy.get('refTradeMethodsId')
+                    procurement_method = None
+                    if trade_method_id:
+                        procurement_method = self.TRADE_METHODS.get(trade_method_id)
+                        if not procurement_method:
+                            procurement_method = f"ID: {trade_method_id}"
+
+                    lot_data = {
+                        'announcement_number': number_anno,
+                        'announcement_url': f"https://goszakup.gov.kz/ru/announce/index/{trd_buy_id}" if trd_buy_id else 'N/A',
+                        'organization_name': customer_name,
+                        'organization_bin': customer_bin or 'N/A',
+                        'legal_address': legal_address,
+                        'region': region,
+                        'lot_number': lot.get('lotNumber'),
+                        'lot_name': lot_name or 'N/A',
+                        'lot_description': lot_desc,
+                        'keyword_matched': matched_keyword,
+                        'application_deadline': application_deadline,
+                        'procurement_method': procurement_method
+                    }
+
+                    found_lots.append(lot_data)
+                    new_in_page += 1
+
+                print(f"   → Новых уникальных: {new_in_page}")
+
+                # Если получили меньше лотов, чем запрашивали — это последняя страница
+                if len(lots) < RESULTS_PER_PAGE:
+                    break
+
+                # Задержка между страницами
+                time.sleep(0.3)
+
+            except requests.RequestException as e:
+                print(f"   ❌ Ошибка запроса (страница {page + 1}): {e}")
+                break
+
+        return found_lots
+
+    def _find_matched_keyword(self, keywords: List[str], lot_name: str, lot_desc: str, announcement_name: str) -> Optional[str]:
+        """Найти совпавшее ключевое слово в текстовых полях лота"""
+        name_lower = lot_name.lower()
+        desc_lower = lot_desc.lower()
+        anno_lower = announcement_name.lower()
+
+        for keyword in keywords:
+            kw = keyword.lower()
+            if kw in name_lower or kw in desc_lower or kw in anno_lower:
+                return keyword
+        return None
+
+    def _filter_lots_by_date(self, lots: List[Dict], days_back: int) -> List[Dict]:
+        """
+        Фильтровать лоты по дате дедлайна и публикации
+
+        Args:
+            lots: Список лотов
+            days_back: Количество дней назад для фильтрации
+
+        Returns:
+            Отфильтрованный список лотов
+        """
+        from datetime import datetime, timedelta
+
+        # Граница: сегодня минус days_back дней
+        cutoff_deadline = datetime.now() - timedelta(days=days_back)
+
+        # Граница для публикации: 7 дней назад
+        cutoff_publication = datetime.now() - timedelta(days=7)
+
+        filtered = []
+        skipped_expired = 0
+        skipped_old = 0
+
+        for lot in lots:
+            # Проверка дедлайна (application_deadline)
+            deadline = lot.get('application_deadline')
+            if deadline:
+                # Если дедлайн в прошлом или слишком старый - пропускаем
+                if deadline < cutoff_deadline:
+                    skipped_expired += 1
+                    continue
+
+            # TODO: Добавить проверку даты публикации если API вернет startDate
+            # Пока пропускаем эту проверку, т.к. startDate не всегда есть в данных
+
+            filtered.append(lot)
+
+        if skipped_expired > 0:
+            print(f"   ⏰ Пропущено просроченных: {skipped_expired}")
+        if skipped_old > 0:
+            print(f"   📅 Пропущено старых: {skipped_old}")
+
+        return filtered
 
     def _group_lots_by_announcement(self, lots: List[Dict]) -> List[Dict]:
         """
@@ -146,23 +367,18 @@ class GoszakupParser:
         """
         from collections import defaultdict
 
-        # Группируем по announcement_number
         announcements_dict = defaultdict(list)
-
         for lot_data in lots:
             announcement_number = lot_data['announcement_number']
             announcements_dict[announcement_number].append(lot_data)
 
-        # Преобразуем в список объявлений
         announcements = []
         for announcement_number, lot_list in announcements_dict.items():
-            # Берем первый лот как базу для данных объявления
             first_lot = lot_list[0]
 
-            # Формируем массив лотов для JSON
             lots_array = [
                 {
-                    'number': lot.get('lot_number'),  # Реальный номер лота
+                    'number': lot.get('lot_number'),
                     'name': lot['lot_name'],
                     'description': lot['lot_description'],
                     'keyword': lot['keyword_matched']
@@ -170,7 +386,6 @@ class GoszakupParser:
                 for lot in lot_list
             ]
 
-            # Собираем уникальные ключевые слова
             all_keywords = list(set(lot['keyword_matched'] for lot in lot_list))
 
             announcement = {
@@ -180,67 +395,16 @@ class GoszakupParser:
                 'organization_bin': first_lot['organization_bin'],
                 'legal_address': first_lot['legal_address'],
                 'region': first_lot['region'],
-                'application_deadline': first_lot['application_deadline'],
-                'procurement_method': first_lot['procurement_method'],
-                'lots': lots_array,  # Массив лотов
-                'keyword_matched': ', '.join(all_keywords)  # Все ключевые слова через запятую
+                'application_deadline': first_lot.get('application_deadline'),
+                'procurement_method': first_lot.get('procurement_method'),
+                'lots': lots_array,
+                'keyword_matched': ', '.join(all_keywords)
             }
 
             announcements.append(announcement)
             print(f"📋 Объявление {announcement_number}: {len(lot_list)} лот(ов)")
 
         return announcements
-
-    def _extract_lot_data(self, lot: Dict, keyword: str) -> Optional[Dict]:
-        """Извлечь данные из лота"""
-        try:
-            # Получаем номер объявления
-            trd_buy_id = lot.get('trd_buy_id')
-            if not trd_buy_id:
-                print(f"⚠️ У лота нет trd_buy_id")
-                return None
-
-            print(f"🔍 Получение деталей объявления {trd_buy_id}...")
-
-            # Получаем детали объявления
-            announcement_data = self.get_announcement_details(trd_buy_id)
-            if not announcement_data:
-                print(f"⚠️ Не удалось получить детали объявления {trd_buy_id}")
-                return None
-
-            kato_code = announcement_data.get('kato_code', '')
-            customer_name = announcement_data.get('customer_name', 'N/A')
-            customer_bin = announcement_data.get('customer_bin', 'N/A')
-
-            # Получаем реальный адрес по БИН
-            print(f"🏢 Запрос адреса для БИН: {customer_bin}")
-            legal_address = self.get_customer_address(customer_bin)
-            print(f"📍 Полученный адрес: {legal_address}")
-
-            # Определяем регион из юридического адреса (ТОЛЬКО из адреса, без KATO)
-            print(f"🔍 Определение региона из адреса: '{legal_address}'")
-            region = self._extract_region(legal_address)
-            print(f"   Результат: '{region}'")
-
-            # Формируем полные данные
-            return {
-                'announcement_number': announcement_data.get('number_anno', 'N/A'),
-                'announcement_url': f"https://goszakup.gov.kz/ru/announce/index/{trd_buy_id}",
-                'organization_name': customer_name,
-                'organization_bin': customer_bin,
-                'legal_address': legal_address,
-                'region': region,
-                'lot_number': lot.get('id') or lot.get('number') or lot.get('lot_number'),  # Реальный номер лота
-                'lot_name': lot.get('name_ru', 'N/A'),
-                'lot_description': lot.get('description_ru', ''),
-                'keyword_matched': keyword,
-                'application_deadline': announcement_data.get('application_deadline'),
-                'procurement_method': announcement_data.get('procurement_method')
-            }
-
-        except Exception as e:
-            print(f"⚠️ Ошибка при извлечении данных лота: {e}")
-            return None
 
     def get_customer_address(self, customer_bin: str) -> str:
         """
@@ -255,6 +419,10 @@ class GoszakupParser:
         if not customer_bin or customer_bin == 'N/A':
             return 'Не указан'
 
+        # Проверяем кеш
+        if customer_bin in self._address_cache:
+            return self._address_cache[customer_bin]
+
         url = f"{self.rest_api_base}/subject/biin/{customer_bin}/address"
 
         try:
@@ -263,12 +431,13 @@ class GoszakupParser:
             data = response.json()
 
             if 'items' in data and len(data['items']) > 0:
-                # Берем первый адрес (обычно это юридический адрес)
                 address = data['items'][0].get('address', 'Не указан')
                 print(f"   ✓ Получен адрес по БИН {customer_bin}: {address}")
+                self._address_cache[customer_bin] = address
                 return address
             else:
                 print(f"   ⚠️ Адрес не найден для БИН {customer_bin}")
+                self._address_cache[customer_bin] = 'Не указан'
                 return 'Не указан'
 
         except Exception as e:
@@ -308,7 +477,6 @@ class GoszakupParser:
             application_deadline = None
             if end_date_str:
                 try:
-                    # Парсим дату из строки (обычно формат ISO 8601)
                     from dateutil import parser as date_parser
                     application_deadline = date_parser.parse(end_date_str)
                 except Exception as e:
@@ -637,6 +805,7 @@ class GoszakupParser:
             'петропавловск': 'Северо-Казахстанская область',
 
             # Абайская область
+            'область абай': 'Абайская область',  # API возвращает в формате "область Абай"
             'абайская область': 'Абайская область',
             'абайская обл': 'Абайская область',
             'абай. обл': 'Абайская область',
@@ -647,6 +816,7 @@ class GoszakupParser:
             'семипалатинск': 'Абайская область',
 
             # Жетісуская область
+            'область жетісу': 'Жетісуская область',  # API возвращает в формате "область Жетісу"
             'жетісуская область': 'Жетісуская область',
             'жетісуская обл': 'Жетісуская область',
             'жетісу. обл': 'Жетісуская область',
@@ -657,6 +827,7 @@ class GoszakupParser:
             'талдыкорган': 'Жетісуская область',
 
             # Улытауская область
+            'область улытау': 'Улытауская область',  # API возвращает в формате "область Улытау"
             'улытауская область': 'Улытауская область',
             'улытауская обл': 'Улытауская область',
             'улытау. обл': 'Улытауская область',

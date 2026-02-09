@@ -3,8 +3,13 @@
 config.py
 venv/
 env/
+
+# Python cache
 *.pyc
 __pycache__/
+.pytest_cache/
+.tox/
+*.egg-info/
 
 # Google Credentials
 credentials/
@@ -14,6 +19,8 @@ credentials/
 *.db
 *.sqlite
 *.sqlite3
+*.db.backup*
+goszakup.db.backup*
 
 # Reports
 reports/*.xlsx
@@ -29,7 +36,15 @@ logs/
 *.swp
 *.swo
 
-# OS
+# OS Files (macOS)
 .DS_Store
+._*
 Thumbs.db
-credentials/
+Desktop.ini
+
+# Temporary files
+tmpclaude-*
+*.tmp
+temp/
+tmp/
+.claude/cwd

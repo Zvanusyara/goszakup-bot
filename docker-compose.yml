@@ -1,0 +1,22 @@
+services:
+  goszakup-bot:
+    build: .
+    container_name: goszakup-bot
+    restart: unless-stopped
+
+    # Переменные окружения из .env файла
+    env_file:
+      - .env
+
+    # Тома для сохранения данных
+    volumes:
+      - ./goszakup.db:/app/goszakup.db           # База данных SQLite
+      - ./logs:/app/logs                         # Логи
+      - ./credentials:/app/credentials:ro        # Credentials (read-only)
+
+    # Политика перезапуска
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

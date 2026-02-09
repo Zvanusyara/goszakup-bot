@@ -539,3 +539,47 @@ def get_coordinator_announcement_detail_keyboard() -> InlineKeyboardMarkup:
     ])
 
     return keyboard
+
+
+def get_lot_selection_keyboard(announcement_id: int, lots_data: list, filled_lots: dict) -> InlineKeyboardMarkup:
+    """
+    Генерация клавиатуры с кнопками лотов
+
+    Args:
+        announcement_id: ID объявления
+        lots_data: Список всех лотов
+        filled_lots: Словарь заполненных лотов {index: details}
+
+    Returns:
+        Клавиатура с кнопками незаполненных лотов
+    """
+    buttons = []
+
+    for i, lot in enumerate(lots_data):
+        # Пропустить заполненные
+        if i in filled_lots:
+            continue
+
+        # Формат кнопки
+        lot_number = lot.get('number') or (i + 1)
+        lot_name = lot.get('name', 'N/A')
+        lot_name_short = lot_name[:30] + '...' if len(lot_name) > 30 else lot_name
+
+        button_text = f"ЛОТ №{lot_number}: {lot_name_short}"
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"lot_select_{announcement_id}_{i}"
+            )
+        ])
+
+    # Добавить кнопку "Назад"
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"lot_cancel_{announcement_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

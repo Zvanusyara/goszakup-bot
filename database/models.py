@@ -44,14 +44,16 @@ class Announcement(Base):
 
     application_deadline = Column(DateTime, nullable=True)  # Срок окончания приема заявок
     procurement_method = Column(String(200), nullable=True)  # Способ проведения закупки
-    participation_details = Column(Text, nullable=True)  # Информация о товаре для участия
+    participation_details = Column(Text, nullable=True)  # Информация о товаре для участия (финальная)
+    participation_details_draft = Column(Text, nullable=True)  # Черновик деталей участия (для восстановления)
 
     # Привязка к менеджеру
     manager_id = Column(Integer, index=True)
     manager_name = Column(String(200))
 
     # Статус обработки
-    status = Column(String(50), default='pending', index=True)  # pending, accepted, rejected
+    status = Column(String(50), default='pending', index=True)  # pending, accepted, rejected, expired
+    expired_at = Column(DateTime, nullable=True)  # Когда объявление было помечено как истекшее
     rejection_reason = Column(Text, nullable=True)
     is_processed = Column(Boolean, default=False)  # Обработано ли менеджером после принятия
 

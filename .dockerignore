@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Документация
+*.md
+INSTALL.md
+README.md
+TESTING.md
+QUICKSTART_TEST.md
+GOOGLE_SHEETS_SETUP.md
+
+# Тесты
+test_*.py
+*_test.py
+
+# Базы данных и логи (будут монтироваться через volumes)
+*.db
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

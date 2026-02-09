@@ -104,6 +104,19 @@ class MockGoszakupParser:
             # Генерируем уникальный номер объявления
             announcement_number = f"TEST-{datetime.now().year}-{random.randint(1000, 9999)}-{i}"
 
+            # Генерируем срок окончания приема заявок (через 7-30 дней от текущей даты)
+            days_ahead = random.randint(7, 30)
+            application_deadline = datetime.now() + timedelta(days=days_ahead)
+
+            # Способы закупки
+            procurement_methods = [
+                'Конкурс',
+                'Тендер',
+                'Запрос ценовых предложений',
+                'Из одного источника',
+                'Аукцион'
+            ]
+
             lot_data = {
                 'announcement_number': announcement_number,
                 'announcement_url': f"https://goszakup.gov.kz/ru/announce/index/{random.randint(10000, 99999)}",
@@ -113,7 +126,9 @@ class MockGoszakupParser:
                 'region': org['region'],
                 'lot_name': lot['name'],
                 'lot_description': lot['description'],
-                'keyword_matched': lot['keyword']
+                'keyword_matched': lot['keyword'],
+                'application_deadline': application_deadline,
+                'procurement_method': random.choice(procurement_methods)
             }
 
             found_lots.append(lot_data)

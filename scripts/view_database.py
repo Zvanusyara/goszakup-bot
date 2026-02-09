@@ -1,6 +1,11 @@
 """
 Скрипт для просмотра данных из базы данных
 """
+import sys
+import os
+# Добавить корень проекта в sys.path для импортов
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from database.models import init_database
 from database.crud import AnnouncementCRUD, ManagerActionCRUD, ParsingLogCRUD
 from datetime import datetime

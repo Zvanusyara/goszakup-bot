@@ -8,7 +8,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import MANAGERS
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 
 class ManagerMatcher:
@@ -17,20 +17,22 @@ class ManagerMatcher:
     def __init__(self):
         self.managers = MANAGERS
 
-    def find_manager(self, announcement: Dict) -> Optional[Dict]:
+    def find_managers(self, announcement: Dict) -> List[Dict]:
         """
-        Найти подходящего менеджера для объявления
+        Найти всех подходящих менеджеров для объявления
 
         Args:
             announcement: Словарь с данными объявления (region, keyword_matched)
 
         Returns:
-            Словарь с данными менеджера или None
+            Список словарей с данными менеджеров
         """
         region = announcement.get('region', '').lower()
         keyword = announcement.get('keyword_matched', '').lower()
 
-        print(f"🔍 Поиск менеджера для региона: {region}, ключевое слово: {keyword}")
+        print(f"🔍 Поиск менеджеров для региона: {region}, ключевое слово: {keyword}")
+
+        matched_managers = []
 
         # Проходим по всем менеджерам
         for manager_id, manager_data in self.managers.items():
@@ -48,14 +50,31 @@ class ManagerMatcher:
 
             if region_match:
                 print(f"✅ Найден менеджер: {manager_data['name']} (ID: {manager_id})")
-                return {
+                matched_managers.append({
                     'manager_id': manager_id,
                     'manager_name': manager_data['name'],
                     'telegram_id': manager_data['telegram_id']
-                }
+                })
 
-        print(f"⚠️ Менеджер не найден для региона: {region}")
-        return None
+        if not matched_managers:
+            print(f"⚠️ Менеджеры не найдены для региона: {region}")
+        elif len(matched_managers) > 1:
+            print(f"📋 Найдено менеджеров: {len(matched_managers)} (общий регион)")
+
+        return matched_managers
+
+    def find_manager(self, announcement: Dict) -> Optional[Dict]:
+        """
+        Найти подходящего менеджера для объявления (первого из списка)
+
+        Args:
+            announcement: Словарь с данными объявления (region, keyword_matched)
+
+        Returns:
+            Словарь с данными менеджера или None
+        """
+        managers = self.find_managers(announcement)
+        return managers[0] if managers else None
 
     def _check_region_match(self, announcement_region: str, manager_regions: list) -> bool:
         """

@@ -94,7 +94,12 @@ class GoogleSheetsManager:
             logger.success("Google Sheets успешно инициализирован")
 
         except Exception as e:
-            logger.error(f"Ошибка инициализации Google Sheets: {e}")
+            # Обнаружение DNS/сетевых ошибок
+            error_str = str(e).lower()
+            if 'name resolution' in error_str or 'getaddrinfo failed' in error_str or 'dns' in error_str:
+                logger.error(f"❌ Ошибка сети при инициализации Google Sheets (проверьте подключение к интернету): {e}")
+            else:
+                logger.error(f"Ошибка инициализации Google Sheets: {e}", exc_info=True)
             self.enabled = False
 
     def _initialize_headers(self):
@@ -147,6 +152,28 @@ class GoogleSheetsManager:
 
         except Exception as e:
             logger.error(f"Ошибка инициализации заголовков: {e}")
+
+    def retry_initialization(self) -> bool:
+        """
+        Повторная инициализация Google Sheets после восстановления сети
+
+        Returns:
+            True если инициализация успешна, False при ошибке
+        """
+        if self.enabled and self.client:
+            logger.info("Google Sheets уже инициализирован")
+            return True
+
+        logger.info("🔄 Попытка повторной инициализации Google Sheets...")
+        self.enabled = True  # Временно включаем для попытки инициализации
+        self._initialize()
+
+        if self.enabled:
+            logger.success("✅ Google Sheets успешно переинициализирован")
+            return True
+        else:
+            logger.warning("⚠️ Не удалось переинициализировать Google Sheets")
+            return False
 
     def _utc_to_local(self, utc_dt: datetime) -> datetime:
         """
@@ -213,13 +240,18 @@ class GoogleSheetsManager:
             # Старый формат - один лот
             lots_str = announcement.lot_name or ''
 
+        # Формируем кликабельную ссылку "ТЫЦ"
+        link_formula = ''
+        if announcement.announcement_url:
+            link_formula = f'=HYPERLINK("{announcement.announcement_url}";"ТЫЦ")'
+
         return [
             created_at_local.strftime('%Y-%m-%d %H:%M:%S') if created_at_local else '',
             application_deadline_str,
             announcement.announcement_number or '',
-            announcement.announcement_url or '',
+            link_formula,
             announcement.organization_name or '',
-            announcement.region or '',
+            announcement.legal_address or '',
             lots_str,
             keywords_str,
             announcement.manager_name or '',
@@ -274,6 +306,7 @@ class GoogleSheetsManager:
             True если успешно, False при ошибке
         """
         if not self.enabled:
+            logger.warning("Google Sheets отключен, синхронизация пропущена")
             return False
 
         try:
@@ -311,6 +344,7 @@ class GoogleSheetsManager:
             True если успешно, False при ошибке
         """
         if not self.enabled:
+            logger.warning("Google Sheets отключен, синхронизация пропущена")
             return False
 
         try:

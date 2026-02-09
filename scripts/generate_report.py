@@ -2,6 +2,10 @@
 Скрипт для генерации Excel отчета
 """
 import sys
+import os
+# Добавить корень проекта в sys.path для импортов
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from datetime import datetime, timedelta
 from reports.excel import ExcelReportGenerator
 from database.models import init_database

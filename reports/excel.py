@@ -3,7 +3,7 @@
 """
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
@@ -25,6 +25,20 @@ class ExcelReportGenerator:
 
         # Создать директорию если не существует
         os.makedirs(self.reports_dir, exist_ok=True)
+
+    def _utc_to_local(self, utc_dt: datetime) -> datetime:
+        """
+        Конвертация UTC времени в местное время Казахстана (UTC+5)
+
+        Args:
+            utc_dt: Время в UTC
+
+        Returns:
+            Время в часовом поясе Казахстана
+        """
+        if utc_dt:
+            return utc_dt + timedelta(hours=5)
+        return None
 
     def generate_report(
         self,
@@ -68,6 +82,7 @@ class ExcelReportGenerator:
             'Статус',
             'Причина отказа',
             'Дата ответа',
+            'Детали участия',
             'Ссылка'
         ]
 
@@ -85,7 +100,11 @@ class ExcelReportGenerator:
 
         # Записать данные
         for row_idx, announcement in enumerate(announcements, start=2):
-            ws.cell(row=row_idx, column=1, value=announcement.created_at.strftime('%Y-%m-%d %H:%M'))
+            # Конвертируем UTC время в местное время Казахстана
+            created_at_local = self._utc_to_local(announcement.created_at)
+            response_at_local = self._utc_to_local(announcement.response_at)
+
+            ws.cell(row=row_idx, column=1, value=created_at_local.strftime('%Y-%m-%d %H:%M') if created_at_local else '')
             ws.cell(row=row_idx, column=2, value=announcement.announcement_number)
             ws.cell(row=row_idx, column=3, value=announcement.organization_name)
             ws.cell(row=row_idx, column=4, value=announcement.legal_address)
@@ -108,12 +127,13 @@ class ExcelReportGenerator:
 
             ws.cell(row=row_idx, column=10, value=announcement.rejection_reason or '-')
 
-            if announcement.response_at:
-                ws.cell(row=row_idx, column=11, value=announcement.response_at.strftime('%Y-%m-%d %H:%M'))
+            if response_at_local:
+                ws.cell(row=row_idx, column=11, value=response_at_local.strftime('%Y-%m-%d %H:%M'))
             else:
                 ws.cell(row=row_idx, column=11, value='-')
 
-            ws.cell(row=row_idx, column=12, value=announcement.announcement_url)
+            ws.cell(row=row_idx, column=12, value=announcement.participation_details or '-')
+            ws.cell(row=row_idx, column=13, value=announcement.announcement_url)
 
         # Автоподбор ширины столбцов
         for col in range(1, len(headers) + 1):

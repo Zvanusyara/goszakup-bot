@@ -346,23 +346,18 @@ def format_announcement_details(announcement) -> str:
     Returns:
         Отформатированное сообщение
     """
-    status_emoji = "✅" if announcement.is_processed else "⏳"
+    # Используем ту же логику, что и при первой отправке
+    message = format_announcement_message(announcement, for_manager=True)
 
-    message = (
-        f"{status_emoji} <b>Объявление #{announcement.announcement_number}</b>\n\n"
-        f"📋 <b>Номер:</b> {announcement.announcement_number}\n"
-        f"📍 <b>Регион:</b> {announcement.region or 'N/A'}\n"
-        f"🏢 <b>Организация:</b> {announcement.organization_name or 'N/A'}\n"
-        f"📫 <b>Юридический адрес:</b> {announcement.legal_address or 'N/A'}\n\n"
-        f"💼 <b>Лот:</b> {announcement.lot_name or 'N/A'}\n"
-        f"🏷️ <b>Ключевое слово:</b> {announcement.keyword_matched or 'N/A'}\n\n"
-        f"🔗 <a href='{announcement.announcement_url or '#'}'>Открыть объявление</a>\n\n"
-    )
+    # Заменяем заголовок и добавляем статус
+    message = message.replace("🔔 <b>Новое объявление</b>",
+                             f"{'✅' if announcement.is_processed else '📄'} <b>Подробности объявления</b>")
 
+    # Добавляем статус обработки в конце
     if announcement.is_processed:
-        message += "✅ <b>Статус:</b> Обработано"
+        message += "\n\n✅ <b>Статус:</b> Обработано"
     else:
-        message += "⏳ <b>Статус:</b> В работе"
+        message += "\n\n⏳ <b>Статус:</b> В работе"
 
     return message
 

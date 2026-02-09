@@ -105,13 +105,19 @@ class RejectionState(StatesGroup):
     waiting_for_reason = State()
 
 
-# FSM для получения деталей участия
-class ParticipationState(StatesGroup):
+# FSM для пошагового сбора информации по лотам
+class LotParticipationState(StatesGroup):
+    selecting_lot = State()
     waiting_for_details = State()
 
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
+    try:
+        await message.delete()
+    except:
+        pass
+
     user_id = message.from_user.id
     keyboard = get_user_keyboard(user_id)
 
@@ -127,6 +133,11 @@ async def cmd_start(message: Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
+    try:
+        await message.delete()
+    except:
+        pass
+
     keyboard = get_user_keyboard(message.from_user.id)
     await message.answer(HELP_MESSAGE, parse_mode='HTML', reply_markup=keyboard)
 
@@ -134,6 +145,11 @@ async def cmd_help(message: Message):
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     """Обработчик команды /stats - статистика менеджера"""
+    try:
+        await message.delete()
+    except:
+        pass
+
     user_id = message.from_user.id
 
     # Найти ID менеджера по Telegram ID
@@ -188,6 +204,11 @@ async def cmd_stats(message: Message):
 @router.message(Command("my_work"))
 async def cmd_my_work(message: Message):
     """Обработчик команды /my_work - объявления в работе"""
+    try:
+        await message.delete()
+    except:
+        pass
+
     user_id = message.from_user.id
 
     # Найти ID менеджера по Telegram ID
@@ -223,6 +244,11 @@ async def cmd_my_work(message: Message):
 @router.message(Command("pending"))
 async def cmd_pending(message: Message):
     """Обработчик команды /pending - не принятые объявления"""
+    try:
+        await message.delete()
+    except:
+        pass
+
     user_id = message.from_user.id
 
     # Найти ID менеджера по Telegram ID
@@ -334,6 +360,11 @@ def get_admin_dashboard_data() -> dict:
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     """Обработчик команды /admin - дашборд администратора"""
+    try:
+        await message.delete()
+    except:
+        pass
+
     user_id = message.from_user.id
 
     # Проверка прав администратора
@@ -370,6 +401,9 @@ async def callback_accept(callback: CallbackQuery, bot: Bot):
     if not manager_id:
         await callback.answer("❌ Вы не авторизованы", show_alert=True)
         return
+
+    # Ответить на callback сразу, чтобы не истек таймаут
+    await callback.answer("✅ Объявление принято в работу!", show_alert=True)
 
     # Обновить статус в БД
     AnnouncementCRUD.update_status(announcement_id, 'accepted')
@@ -428,8 +462,6 @@ async def callback_accept(callback: CallbackQuery, bot: Bot):
         parse_mode='HTML'
     )
 
-    await callback.answer("✅ Объявление принято в работу!", show_alert=True)
-
 
 @router.callback_query(F.data.startswith("reject_"))
 async def callback_reject(callback: CallbackQuery, state: FSMContext):
@@ -456,6 +488,12 @@ async def process_rejection_reason(message: Message, state: FSMContext, bot: Bot
     announcement_id = data.get('announcement_id')
 
     user_id = message.from_user.id
+
+    # Удалить сообщение пользователя
+    try:
+        await message.delete()
+    except:
+        pass  # Игнорируем ошибки удаления
 
     # Найти менеджера
     manager_id = None
@@ -520,54 +558,159 @@ async def process_rejection_reason(message: Message, state: FSMContext, bot: Bot
     await state.clear()
 
 
-@router.message(StateFilter(ParticipationState.waiting_for_details))
-async def process_participation_details(message: Message, state: FSMContext):
-    """Обработчик деталей участия"""
-    details = message.text
-    data = await state.get_data()
-    announcement_id = data.get('announcement_id')
-    manager_id = data.get('manager_id')
-    manager_name = data.get('manager_name')
+@router.callback_query(F.data.startswith("lot_select_"), StateFilter(LotParticipationState.selecting_lot))
+async def callback_lot_select(callback: CallbackQuery, state: FSMContext):
+    """Обработчик выбора лота"""
 
-    # Обновить детали участия и отметить как обработанное
+    # Парсинг: lot_select_{announcement_id}_{lot_index}
+    parts = callback.data.split("_")
+    announcement_id = int(parts[2])
+    lot_index = int(parts[3])
+
+    # Получить данные из state
+    data = await state.get_data()
+    all_lots = data.get('all_lots', [])
+
+    # Валидация
+    if lot_index >= len(all_lots):
+        await callback.answer("❌ Некорректный лот", show_alert=True)
+        return
+
+    # Сохранить выбранный лот
+    await state.update_data(current_lot_index=lot_index)
+    await state.set_state(LotParticipationState.waiting_for_details)
+
+    # Показать информацию о лоте
+    lot = all_lots[lot_index]
+    lot_number = lot.get('number') or (lot_index + 1)
+    lot_name = lot.get('name', 'N/A')
+
+    text = (
+        f"📦 <b>ЛОТ №{lot_number}</b>\n"
+        f"{lot_name}\n\n"
+        f"✍️ <b>Напиши информацию о товаре:</b>"
+    )
+
+    await callback.message.answer(text, parse_mode='HTML')
+    await callback.answer()
+
+
+@router.message(StateFilter(LotParticipationState.waiting_for_details))
+async def process_lot_details(message: Message, state: FSMContext):
+    """Обработчик ввода информации о лоте"""
+
+    details_text = message.text
+    data = await state.get_data()
+
+    current_lot_index = data.get('current_lot_index')
+    filled_lots = data.get('filled_lots', {})
+    all_lots = data.get('all_lots', [])
+    announcement_id = data.get('announcement_id')
+
+    # Удалить сообщение пользователя
+    try:
+        await message.delete()
+    except:
+        pass  # Игнорируем ошибки удаления (например, если сообщение уже удалено)
+
+    # Сохранить информацию
+    filled_lots[current_lot_index] = details_text
+    await state.update_data(filled_lots=filled_lots)
+
+    # Сохранить черновик в БД (для восстановления после закрытия)
+    await save_participation_draft(announcement_id, all_lots, filled_lots)
+
+    # Проверить: все ли лоты заполнены?
+    if len(filled_lots) == len(all_lots):
+        await finalize_participation_details(message, state)
+    else:
+        await message.answer(
+            f"✅ Информация сохранена!\n\n"
+            f"Заполнено: {len(filled_lots)} из {len(all_lots)}"
+        )
+
+        # Вернуться к выбору следующего лота
+        await state.set_state(LotParticipationState.selecting_lot)
+        await show_lot_selection(message, state, announcement_id, all_lots, filled_lots)
+
+
+@router.callback_query(F.data.startswith("lot_cancel_"))
+async def callback_lot_cancel(callback: CallbackQuery, state: FSMContext):
+    """Обработчик кнопки 'Назад' при выборе лота"""
+    import json
+
+    announcement_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    # Очистить FSM состояние
+    await state.clear()
+
+    # Проверка авторизации менеджера
+    manager_id = None
+    for mid, mdata in MANAGERS.items():
+        if mdata['telegram_id'] == user_id:
+            manager_id = mid
+            break
+
+    if not manager_id:
+        await callback.answer("❌ Вы не авторизованы", show_alert=True)
+        return
+
+    # Получить объявление из БД
     session = get_session()
     try:
         announcement = session.query(Announcement).filter(
-            Announcement.id == announcement_id
+            Announcement.id == announcement_id,
+            Announcement.manager_id == manager_id
         ).first()
 
-        if announcement:
-            announcement.participation_details = details
-            announcement.is_processed = True
-            session.commit()
+        if not announcement:
+            await callback.answer("❌ Объявление не найдено", show_alert=True)
+            return
 
-            # Обновить в Google Sheets если включено
-            from utils.google_sheets import get_sheets_manager
-            sheets_manager = get_sheets_manager()
-            if sheets_manager.enabled:
-                sheets_manager.update_announcement(announcement)
+        # Обработка информации о лотах
+        lot_info = 'N/A'
 
-            # Записать действие
-            ManagerActionCRUD.create({
-                'announcement_id': announcement_id,
-                'manager_id': manager_id,
-                'manager_name': manager_name,
-                'telegram_id': message.from_user.id,
-                'action': 'processed',
-                'comment': f'Отметил как обработанное. Детали участия: {details[:100]}'
-            })
+        if announcement.lots:
+            try:
+                lots_data = json.loads(announcement.lots) if isinstance(announcement.lots, str) else announcement.lots
+                if lots_data and isinstance(lots_data, list):
+                    if len(lots_data) == 1:
+                        # Один лот - показать название
+                        lot_info = lots_data[0].get('name', 'N/A')
+                    else:
+                        # Несколько лотов - показать количество
+                        lot_info = f"Лотов: {len(lots_data)}"
+            except:
+                # Если ошибка парсинга - fallback на старое поле
+                lot_info = announcement.lot_name or 'N/A'
+        else:
+            # Старый формат - одно поле lot_name
+            lot_info = announcement.lot_name or 'N/A'
 
-            await message.answer(
-                f"✅ Объявление отмечено как обработанное!\n\n"
-                f"📝 Детали участия сохранены:\n{details}",
-                parse_mode='HTML'
-            )
+        # Обрезать если слишком длинное
+        if isinstance(lot_info, str) and len(lot_info) > 100:
+            lot_info = lot_info[:100] + '...'
+
+        # Показать краткую информацию с кнопками действий
+        message_text = (
+            f"{'✅' if announcement.is_processed else '📄'} <b>{announcement.announcement_number}</b>\n\n"
+            f"📍 {announcement.region or 'N/A'}\n"
+            f"🏢 {announcement.organization_name or 'N/A'}\n\n"
+            f"💼 {lot_info}"
+        )
+
+        from bot.keyboards import get_announcement_actions_keyboard
+
+        await callback.message.edit_text(
+            message_text,
+            parse_mode='HTML',
+            reply_markup=get_announcement_actions_keyboard(announcement_id, announcement.is_processed)
+        )
+        await callback.answer()
 
     finally:
         session.close()
-
-    # Очистить состояние
-    await state.clear()
 
 
 @router.callback_query(F.data == "admin_refresh_dashboard")
@@ -624,12 +767,37 @@ async def callback_work_view(callback: CallbackQuery):
             await callback.answer("❌ Объявление не найдено", show_alert=True)
             return
 
+        # Обработка информации о лотах
+        import json
+        lot_info = 'N/A'
+
+        if announcement.lots:
+            try:
+                lots_data = json.loads(announcement.lots) if isinstance(announcement.lots, str) else announcement.lots
+                if lots_data and isinstance(lots_data, list):
+                    if len(lots_data) == 1:
+                        # Один лот - показать название
+                        lot_info = lots_data[0].get('name', 'N/A')
+                    else:
+                        # Несколько лотов - показать количество
+                        lot_info = f"Лотов: {len(lots_data)}"
+            except:
+                # Если ошибка парсинга - fallback на старое поле
+                lot_info = announcement.lot_name or 'N/A'
+        else:
+            # Старый формат - одно поле lot_name
+            lot_info = announcement.lot_name or 'N/A'
+
+        # Обрезать если слишком длинное
+        if isinstance(lot_info, str) and len(lot_info) > 100:
+            lot_info = lot_info[:100] + '...'
+
         # Показать краткую информацию с кнопками действий
         message_text = (
             f"{'✅' if announcement.is_processed else '📄'} <b>{announcement.announcement_number}</b>\n\n"
             f"📍 {announcement.region or 'N/A'}\n"
             f"🏢 {announcement.organization_name or 'N/A'}\n\n"
-            f"💼 {announcement.lot_name[:100] + '...' if announcement.lot_name and len(announcement.lot_name) > 100 else announcement.lot_name or 'N/A'}"
+            f"💼 {lot_info}"
         )
 
         await callback.message.edit_text(
@@ -646,6 +814,8 @@ async def callback_work_view(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("work_processed_"))
 async def callback_work_processed(callback: CallbackQuery, state: FSMContext):
     """Обработчик кнопки 'Обработал'"""
+    import json
+
     announcement_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
 
@@ -662,17 +832,60 @@ async def callback_work_processed(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Вы не авторизованы", show_alert=True)
         return
 
-    # Сохранить ID объявления в состоянии
-    await state.update_data(announcement_id=announcement_id, manager_id=manager_id, manager_name=manager_name)
-    await state.set_state(ParticipationState.waiting_for_details)
+    # Получить объявление из БД
+    session = get_session()
+    try:
+        announcement = session.query(Announcement).filter(
+            Announcement.id == announcement_id
+        ).first()
 
-    # Запросить информацию о товаре для участия
-    await callback.message.answer(
-        "📝 Напиши информацию о товаре для участия:",
-        parse_mode='HTML'
-    )
+        if not announcement:
+            await callback.answer("❌ Объявление не найдено", show_alert=True)
+            return
 
-    await callback.answer()
+        # Десериализовать лоты
+        lots_data = []
+        if announcement.lots:
+            try:
+                lots_data = json.loads(announcement.lots) if isinstance(announcement.lots, str) else announcement.lots
+            except:
+                pass
+
+        # Граничный случай: lots = None или []
+        if not lots_data:
+            lots_data = [{
+                'number': None,
+                'name': announcement.lot_name or 'N/A',
+                'description': announcement.lot_description or '',
+                'keyword': announcement.keyword_matched or ''
+            }]
+
+        # Проверить наличие частично заполненных данных
+        filled_lots = {}
+        if announcement.participation_details_draft:
+            filled_lots = parse_existing_participation_details(
+                announcement.participation_details_draft,
+                lots_data
+            )
+
+        # Сохранить в state
+        await state.update_data(
+            announcement_id=announcement_id,
+            manager_id=manager_id,
+            manager_name=manager_name,
+            all_lots=lots_data,
+            filled_lots=filled_lots
+        )
+
+        # Перейти в состояние выбора лота
+        await state.set_state(LotParticipationState.selecting_lot)
+
+        # Показать клавиатуру с лотами
+        await show_lot_selection(callback.message, state, announcement_id, lots_data, filled_lots)
+        await callback.answer()
+
+    finally:
+        session.close()
 
 
 @router.callback_query(F.data.startswith("work_details_"))
@@ -747,33 +960,48 @@ async def callback_work_back_to_list(callback: CallbackQuery):
 # Обработчики кнопок (текстовых сообщений)
 # ========================================
 
-@router.message(F.text == "📋 Объявления в работе")
 async def button_my_work(message: Message):
-    """Обработчик кнопки 'Объявления в работе'"""
+    """Вспомогательная функция для кнопки 'Объявления в работе' (вызывается из coordinator handler)"""
     await cmd_my_work(message)
 
 
 @router.message(F.text == "📊 Статистика")
 async def button_stats(message: Message):
     """Обработчик кнопки 'Статистика'"""
+    try:
+        await message.delete()
+    except:
+        pass
     await cmd_stats(message)
 
 
 @router.message(F.text == "🔔 Не принятые")
 async def button_pending(message: Message):
     """Обработчик кнопки 'Не принятые'"""
+    try:
+        await message.delete()
+    except:
+        pass
     await cmd_pending(message)
 
 
 @router.message(F.text == "ℹ️ Справка")
 async def button_help(message: Message):
     """Обработчик кнопки 'Справка'"""
+    try:
+        await message.delete()
+    except:
+        pass
     await cmd_help(message)
 
 
 @router.message(F.text == "👔 Админ-панель")
 async def button_admin(message: Message):
     """Обработчик кнопки 'Админ-панель'"""
+    try:
+        await message.delete()
+    except:
+        pass
     await cmd_admin(message)
 
 
@@ -894,6 +1122,9 @@ async def callback_claim_almaty(callback: CallbackQuery):
             await callback.answer("❌ Вы не зарегистрированы как менеджер", show_alert=True)
             return
 
+        # Ответить на callback сразу, чтобы не истек таймаут
+        await callback.answer(f"✅ Объявление назначено вам")
+
         # Получить объявление из БД
         session = get_session()
         try:
@@ -923,7 +1154,6 @@ async def callback_claim_almaty(callback: CallbackQuery):
         # Изменить клавиатуру на обычную
         keyboard = get_announcement_keyboard(announcement_id)
         await callback.message.edit_reply_markup(reply_markup=keyboard)
-        await callback.answer(f"✅ Объявление назначено вам")
 
         # Уведомить других менеджеров из Алматы (1, 3, 4)
         almaty_managers = [1, 3, 4]
@@ -962,6 +1192,11 @@ async def callback_claim_almaty(callback: CallbackQuery):
 @router.message(F.text.in_(["👤 Олеся", "👤 Анастасия", "👤 Жасулан", "👤 Алибек"]))
 async def button_manager(message: Message):
     """Обработчик кнопок менеджеров для админа"""
+    try:
+        await message.delete()
+    except:
+        pass
+
     try:
         user_id = message.from_user.id
 
@@ -1225,6 +1460,11 @@ async def callback_manager_back(callback: CallbackQuery):
 @router.message(F.text == "📋 Объявления в работе")
 async def button_coordinator_work_announcements(message: Message):
     """Обработчик кнопки 'Объявления в работе' для координатора"""
+    try:
+        await message.delete()
+    except:
+        pass
+
     user_id = message.from_user.id
 
     # Проверка, является ли пользователь координатором
@@ -1233,7 +1473,7 @@ async def button_coordinator_work_announcements(message: Message):
     if not is_coordinator:
         # Это может быть менеджер, который нажал ту же кнопку
         # Вызываем обработчик для менеджера
-        return await button_work_announcements(message)
+        return await button_my_work(message)
 
     # Получить объявления со статусом accepted и действующим дедлайном
     announcements = AnnouncementCRUD.get_accepted_with_valid_deadline()
@@ -1320,6 +1560,181 @@ async def callback_coordinator_back_to_list(callback: CallbackQuery):
     except Exception as e:
         print(f"❌ Ошибка в callback_coordinator_back_to_list: {e}")
         await callback.answer("❌ Произошла ошибка.", show_alert=True)
+
+
+def parse_existing_participation_details(details_text: str, lots_data: list) -> dict:
+    """
+    Распарсить существующие данные для восстановления filled_lots
+
+    Args:
+        details_text: Существующий текст с деталями участия
+        lots_data: Список всех лотов
+
+    Returns:
+        Словарь заполненных лотов {index: details}
+    """
+    filled_lots = {}
+    if not details_text:
+        return filled_lots
+
+    lines = details_text.split('\n')
+    for line in lines:
+        if 'Лот №' in line and ':' in line:
+            try:
+                parts = line.split(':', 1)
+                # Убираем эмодзи 📦 и "Лот №"
+                lot_part = parts[0].replace('📦', '').replace('Лот №', '').strip()
+                details_part = parts[1].strip()
+
+                # Номер лота может быть строкой (например, 83848645-ЗЦП1) или числом
+                lot_number_str = lot_part
+
+                # Найти индекс в lots_data
+                for i, lot in enumerate(lots_data):
+                    # Сравниваем как строки
+                    lot_api_number = str(lot.get('number')) if lot.get('number') else str(i + 1)
+                    if lot_api_number == lot_number_str:
+                        filled_lots[i] = details_part
+                        break
+            except:
+                continue
+
+    return filled_lots
+
+
+async def save_participation_draft(announcement_id: int, all_lots: list, filled_lots: dict):
+    """
+    Сохранить черновик для восстановления после прерывания
+
+    Args:
+        announcement_id: ID объявления
+        all_lots: Список всех лотов
+        filled_lots: Словарь заполненных лотов {index: details}
+    """
+    session = get_session()
+    try:
+        announcement = session.query(Announcement).filter(
+            Announcement.id == announcement_id
+        ).first()
+
+        if announcement:
+            # Сформировать черновик
+            draft_lines = []
+            for i, details in filled_lots.items():
+                lot = all_lots[i]
+                lot_number = lot.get('number') or (i + 1)
+                draft_lines.append(f"📦 Лот №{lot_number}: {details}")
+
+            announcement.participation_details_draft = '\n\n'.join(draft_lines)
+            session.commit()
+    finally:
+        session.close()
+
+
+async def show_lot_selection(message, state, announcement_id, lots_data, filled_lots):
+    """
+    Показать клавиатуру выбора лота
+
+    Args:
+        message: Сообщение для редактирования
+        state: FSM состояние
+        announcement_id: ID объявления
+        lots_data: Список всех лотов
+        filled_lots: Словарь заполненных лотов {index: details}
+    """
+    from bot.keyboards import get_lot_selection_keyboard
+
+    # Проверить: все ли лоты заполнены?
+    if len(filled_lots) == len(lots_data):
+        await finalize_participation_details(message, state)
+        return
+
+    # Сформировать сообщение
+    if len(filled_lots) == 0:
+        text = "📋 <b>Оставь информацию по лоту:</b>\n\n"
+    else:
+        text = f"✅ <b>Заполнено: {len(filled_lots)} из {len(lots_data)}</b>\n\n"
+        text += "📋 <b>Оставшиеся лоты:</b>\n\n"
+
+    # Сгенерировать клавиатуру
+    keyboard = get_lot_selection_keyboard(announcement_id, lots_data, filled_lots)
+
+    # Отправить/редактировать
+    try:
+        await message.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
+    except:
+        await message.answer(text, parse_mode='HTML', reply_markup=keyboard)
+
+
+async def finalize_participation_details(message, state):
+    """
+    Завершить процесс: сохранить все данные в БД
+
+    Args:
+        message: Сообщение для ответа
+        state: FSM состояние
+    """
+    data = await state.get_data()
+    announcement_id = data['announcement_id']
+    manager_id = data['manager_id']
+    manager_name = data['manager_name']
+    all_lots = data['all_lots']
+    filled_lots = data['filled_lots']
+
+    # Сформировать строку с реальными переносами
+    lines = []
+    for i in range(len(all_lots)):
+        lot = all_lots[i]
+        lot_number = lot.get('number') or (i + 1)
+        details = filled_lots.get(i, '')
+        lines.append(f"📦 Лот №{lot_number}: {details}")
+
+    participation_details = '\n\n'.join(lines)  # Двойной перенос для пустой строки между лотами
+
+    # Сохранить в БД
+    session = get_session()
+    try:
+        announcement = session.query(Announcement).filter(
+            Announcement.id == announcement_id
+        ).first()
+
+        if announcement:
+            announcement.participation_details = participation_details
+            announcement.participation_details_draft = None  # Очистить черновик
+            announcement.is_processed = True
+            session.commit()
+
+            # Обновить Google Sheets
+            from utils.google_sheets import get_sheets_manager
+            sheets_manager = get_sheets_manager()
+            if sheets_manager.enabled:
+                sheets_manager.update_announcement(announcement)
+
+            # Записать действие
+            ManagerActionCRUD.create({
+                'announcement_id': announcement_id,
+                'manager_id': manager_id,
+                'manager_name': manager_name,
+                'telegram_id': message.from_user.id,
+                'action': 'processed',
+                'comment': f'Отработал. Заполнено {len(filled_lots)} лотов.'
+            })
+
+            # Показать подтверждение
+            preview = '\n'.join(lines[:3])
+            if len(lines) > 3:
+                preview += f"\n... и еще {len(lines) - 3}"
+
+            await message.answer(
+                f"✅ <b>Объявление отмечено как обработанное!</b>\n\n"
+                f"📝 <b>Информация сохранена:</b>\n{preview}",
+                parse_mode='HTML'
+            )
+    finally:
+        session.close()
+
+    # Очистить состояние
+    await state.clear()
 
 
 def get_dispatcher() -> Dispatcher:
